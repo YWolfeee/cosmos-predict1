@@ -180,3 +180,41 @@ discrete_video_4x8x8_360p["z_channels"] = 256
 discrete_video_4x8x8_360p["temporal_compression"] = 4
 discrete_video_4x8x8_360p["spatial_compression"] = 8
 discrete_video_4x8x8_360p["patch_size"] = 2
+
+adaptive_discrete_video = dict(
+    attn_resolutions=[32],
+    channels=128,
+    channels_mult=[2, 4, 4],
+    dropout=0.0,
+    in_channels=3,
+    num_res_blocks=2,
+    out_channels=3,
+    resolution=1024,
+    patch_size=4,
+    patch_method="haar",
+    z_channels=256,
+    z_factor=1,
+    num_groups=1,
+    spatial_compression=16,
+    temporal_compression=8,
+    # Adaptive tokenization parameters
+    min_tokens=256,
+    max_tokens=2048,
+    rate_strategy="elbo",  # Options: uniform, elbo
+    # Quantizer parameters
+    quantizer=DiscreteQuantizer.FSQ.name,
+    embedding_dim=6,
+    levels=[8, 8, 8, 5, 5, 5],
+    encoder=Encoder3DType.FACTORIZED.name,
+    decoder=Decoder3DType.FACTORIZED.name,
+    name="ADV",
+)
+
+adaptive_discrete_video_8x16x16_720p = dict(adaptive_discrete_video)
+adaptive_discrete_video_8x16x16_720p["temporal_compression"] = 8
+adaptive_discrete_video_8x16x16_720p["spatial_compression"] = 16
+
+adaptive_discrete_video_4x8x8_360p = dict(adaptive_discrete_video)
+adaptive_discrete_video_4x8x8_360p["temporal_compression"] = 4
+adaptive_discrete_video_4x8x8_360p["spatial_compression"] = 8
+adaptive_discrete_video_4x8x8_360p["patch_size"] = 2

@@ -23,10 +23,13 @@ from cosmos_predict1.tokenizer.networks.configs import discrete_image_8x8_360p a
 from cosmos_predict1.tokenizer.networks.configs import discrete_image_16x16_360p as discrete_image_16x16_360p_dict
 from cosmos_predict1.tokenizer.networks.configs import discrete_video_4x8x8_360p as discrete_video_4x8x8_360p_dict
 from cosmos_predict1.tokenizer.networks.configs import discrete_video_8x16x16_720p as discrete_video_8x16x16_720p_dict
+from cosmos_predict1.tokenizer.networks.configs import adaptive_discrete_video_4x8x8_360p as adaptive_discrete_video_4x8x8_360p_dict
+from cosmos_predict1.tokenizer.networks.configs import adaptive_discrete_video_8x16x16_720p as adaptive_discrete_video_8x16x16_720p_dict
 from cosmos_predict1.tokenizer.networks.continuous_image import ContinuousImageTokenizer
 from cosmos_predict1.tokenizer.networks.continuous_video import CausalContinuousVideoTokenizer
 from cosmos_predict1.tokenizer.networks.discrete_image import DiscreteImageTokenizer
 from cosmos_predict1.tokenizer.networks.discrete_video import CausalDiscreteVideoTokenizer
+from cosmos_predict1.tokenizer.networks.adaptive_discrete_video import AdaptiveDiscreteVideoTokenizer
 
 
 class TokenizerConfigs(Enum):
@@ -58,6 +61,13 @@ class TokenizerConfigs(Enum):
 
     # Cosmos-Tokenize1-DV4x8x8-360p
     DV4x8x8_360p = discrete_video_4x8x8_360p_dict
+    
+    """Adaptive Discrete Video (ADV) Tokenizer Configs"""
+    # Cosmos-Tokenize1-ADV8x16x16-720p
+    ADV8x16x16_720p = adaptive_discrete_video_8x16x16_720p_dict
+    
+    # Cosmos-Tokenize1-ADV4x8x8-360p
+    ADV4x8x8_360p = adaptive_discrete_video_4x8x8_360p_dict
 
 
 class TokenizerModels(Enum):
@@ -65,3 +75,4 @@ class TokenizerModels(Enum):
     DI = DiscreteImageTokenizer
     CV = CausalContinuousVideoTokenizer
     DV = CausalDiscreteVideoTokenizer
+    ADV = AdaptiveDiscreteVideoTokenizer

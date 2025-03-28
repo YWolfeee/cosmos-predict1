@@ -36,7 +36,7 @@ class Config(config.Config):
             {"optimizer": "fused_adam"},
             {"scheduler": "warmup"},
             # Our TODO: change this to the name of our new tokenizer defined in registry.py
-            {"network": "continuous_factorized_video"},
+            {"network": "adaptive_discrete_video"},
             {"loss": "video"},
             {"metric": "reconstruction"},
             {"checkpoint": "local"},

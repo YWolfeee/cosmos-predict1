@@ -26,6 +26,7 @@ from cosmos_predict1.tokenizer.training.configs.base.net import (
     CausalDiscreteFactorizedVideoTokenizerConfig,
     ContinuousImageTokenizerConfig,
     DiscreteImageTokenizerConfig,
+    AdaptiveDiscreteVideoTokenizerConfig,
 )
 from cosmos_predict1.tokenizer.training.configs.base.optim import (
     AdamWConfig,
@@ -84,6 +85,12 @@ def register_net(cs):
         node=CausalDiscreteFactorizedVideoTokenizerConfig,
     )
     # Our TODO: register our new tokenizer model and the corresponding TokenizerConfig here
+    cs.store(
+        group="network",
+        package="model.config.network",
+        name="adaptive_discrete_video",
+        node=AdaptiveDiscreteVideoTokenizerConfig,
+    )
 
 
 def register_optim(cs):
