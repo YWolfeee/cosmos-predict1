@@ -35,6 +35,7 @@ class Config(config.Config):
             {"data_val": "mock_video720"},
             {"optimizer": "fused_adam"},
             {"scheduler": "warmup"},
+            # Our TODO: change this to the name of our new tokenizer defined in registry.py
             {"network": "continuous_factorized_video"},
             {"loss": "video"},
             {"metric": "reconstruction"},

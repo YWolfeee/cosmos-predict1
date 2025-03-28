@@ -150,6 +150,12 @@ class TokenizerModel(Model):
         data_batch: dict[str, torch.Tensor],
         iteration: int,
     ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+        # Our TODO: Add dynamic-length training logics
+        # Steps:
+        # 1. Additionally get the per-block ELBO from data_batch
+        # 2. Specify the mask rate for each video block using the per-block ELBO (or Unif(0, 1))
+        # 3. Create the mask matrix with additional dimension T based on per-block mask rate
+        # 4. Pass the mask matrix to self._network_forward
         _input_key = self.get_input_key(data_batch)
         output_dict = self._network_forward(data_batch)
         input_images, recon_images = data_batch[_input_key], output_dict[RECON_KEY]
@@ -167,6 +173,7 @@ class TokenizerModel(Model):
         iteration: int,
         ema_model: bool = False,
     ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+        # Our TODO: Do the same modifications as per the function training_step
         _input_key = self.get_input_key(data_batch)
         output_dict = self._network_forward(data_batch)
         input_images, recon_images = data_batch[_input_key], output_dict[RECON_KEY]
