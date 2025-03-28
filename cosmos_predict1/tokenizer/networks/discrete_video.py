@@ -118,3 +118,13 @@ class CausalDiscreteVideoTokenizer(nn.Module):
             quant_loss=quant_loss,
             quant_info=quant_info,
         )
+
+
+# Our TODO: Implement the pixel-discrete1D-pixel tokenizer (akin to ElasticTok)
+# See the pixel-discrete2D-pixel tokenizer above (CausalDiscreteVideoTokenizer) for reference.
+# Steps:
+# 1. Copy the code from ElasticTok on the network design for the encoder and decoder, such that
+# the discrete tokens are 1D.
+# 2. Pay attention to the forward function, which should have the mask matrix as input. Use the
+# mask matrix to mask the 1D tokens before decoding it back to pixel space.
+# The forward function will be used as self._network_forward in training_step func in model.py

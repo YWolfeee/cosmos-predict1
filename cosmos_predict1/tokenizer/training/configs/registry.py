@@ -83,6 +83,7 @@ def register_net(cs):
         name="discrete_factorized_video",
         node=CausalDiscreteFactorizedVideoTokenizerConfig,
     )
+    # Our TODO: register our new tokenizer model and the corresponding TokenizerConfig here
 
 
 def register_optim(cs):
