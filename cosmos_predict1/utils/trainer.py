@@ -178,6 +178,7 @@ class Trainer:
                     iteration=iteration,
                     grad_accum_iter=grad_accum_iter,
                 )
+                print(f"After training_step, iteration={iteration}, loss={loss}") # DEBUG
                 # Do the following when an actual optimizer (update) step has been made.
                 iteration += 1
                 # Save checkpoint.

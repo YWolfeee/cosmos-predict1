@@ -21,7 +21,7 @@ from cosmos_predict1.tokenizer.modules import (
     DecoderType,
     DiscreteQuantizer,
     Encoder3DType,
-    EncoderType,
+    EncoderType
 )
 
 continuous_image = dict(
@@ -181,6 +181,32 @@ discrete_video_4x8x8_360p["temporal_compression"] = 4
 discrete_video_4x8x8_360p["spatial_compression"] = 8
 discrete_video_4x8x8_360p["patch_size"] = 2
 
+# TODO: Check, this might be redundant
+config = dict(
+    hidden_size=768, # smaller for DEBUG, 4096 for full
+    intermediate_size=768, # smaller for DEBUG, 11008 for full
+    num_encoder_layers=4, # smaller for DEBUG, 16 for full
+    num_decoder_layers=4, # smaller for DEBUG, 16 for full
+    num_attention_heads=16, # smaller for DEBUG, 32 for full
+    max_sequence_length=4096,
+    theta=10000.0,
+    rms_norm_eps=1e-5,
+    initializer_range=0.02,
+    patch_size=(1, 8, 8), # This patch_size currently is redundant
+    # Additional placeholders from JAX version
+    mask_type='elastic',
+    min_toks=256,
+    max_toks=2048,
+    frames_per_block=1,
+    lpips_loss_ratio=0.1,
+    bottleneck_type='fsq',
+    fsq_quant_levels=(8, 8, 8, 5, 5, 5),
+    vae_bottleneck_dim=8,
+    scan_layers=True,
+    scan_attention=False,
+)
+
+### TODO: filter out unnecessary parameters here
 adaptive_discrete_video = dict(
     attn_resolutions=[32],
     channels=128,
@@ -205,9 +231,10 @@ adaptive_discrete_video = dict(
     quantizer=DiscreteQuantizer.FSQ.name,
     embedding_dim=6,
     levels=[8, 8, 8, 5, 5, 5],
-    encoder=Encoder3DType.FACTORIZED.name,
-    decoder=Decoder3DType.FACTORIZED.name,
+    encoder=Encoder3DType.ViT.name,
+    decoder=Decoder3DType.ViT.name,
     name="ADV",
+    config=config, # This is important to utilize settings from OURs
 )
 
 adaptive_discrete_video_8x16x16_720p = dict(adaptive_discrete_video)

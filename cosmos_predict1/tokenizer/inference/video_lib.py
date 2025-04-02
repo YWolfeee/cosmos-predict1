@@ -144,3 +144,12 @@ class CausalVideoTokenizer(torch.nn.Module):
 
             output_video_list.append(output_video)
         return np.concatenate(output_video_list, axis=1)
+    
+class AdaptiveVideoTokenizer(torch.nn.Module):
+    # TODO: Implement the inference code of AdaptiveVideoTokenizer
+    def __init__(self, **kwargs):
+        super().__init__()
+        pass
+
+    def forward(self, input_tensor: torch.Tensor) -> torch.Tensor:
+        pass

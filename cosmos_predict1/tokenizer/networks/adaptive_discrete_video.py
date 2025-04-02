@@ -164,11 +164,11 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
         self.rate_strategy = kwargs.get("rate_strategy", "uniform")
         
         # Initialize 3D encoder (similar to CausalDiscreteVideoTokenizer)
-        encoder_name = kwargs.get("encoder", Encoder3DType.BASE.name)
+        encoder_name = kwargs.get("encoder", Encoder3DType.ViT.name)
         self.encoder = Encoder3DType[encoder_name].value(z_channels=z_factor * z_channels, **kwargs)
         
         # Initialize 3D decoder (similar to CausalDiscreteVideoTokenizer)
-        decoder_name = kwargs.get("decoder", Decoder3DType.BASE.name)
+        decoder_name = kwargs.get("decoder", Decoder3DType.ViT.name)
         self.decoder = Decoder3DType[decoder_name].value(z_channels=z_channels, **kwargs)
         
         # Convolutional layers for dimensionality transformations
@@ -188,13 +188,8 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
             assert "levels" in kwargs, f"`levels` must be provided for {quantizer_name}."
         self.quantizer = DiscreteQuantizer[quantizer_name].value(**kwargs)
         
-        # Adaptive tokenization module
-        self.adaptive_tokenization = AdaptiveTokenizationModule(
-            min_tokens=self.min_tokens,
-            max_tokens=self.max_tokens,
-            rate_strategy=self.rate_strategy,
-            **kwargs
-        )
+        # Adaptive tokenization module, min_tokens, max_tokens, rate_strategy are included in kwargs
+        self.adaptive_tokenization = AdaptiveTokenizationModule(**kwargs)
         
         logging.info(f"{self.name} based on {quantizer_name}, with {kwargs}.")
         num_parameters = sum(param.numel() for param in self.parameters())
@@ -244,6 +239,7 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
             Masked tensor of shape [B, C, L]
         """
         # Expand mask to match dimensions
+        # TODO: This is not necessary if we use attention mask
         mask = mask.unsqueeze(1)  # [B, 1, L]
         return x * mask
     
@@ -259,9 +255,10 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
             quant_codes: Quantized codes
             quant_loss: Quantization loss
         """
+        # TODO: Add attention mask which is both causal and adaptive
         # Encode input to latent representation
-        h = self.encoder(x)
-        h = self.quant_conv(h)
+        h = self.encoder(x, encoding_mask=None, attention_mask=None)
+        h = self.quant_conv(h) # h: (B, embedding_dim, T, H, W)
         
         # Store original 3D shape
         B, C, T, H, W = h.shape
@@ -278,15 +275,15 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
             # Apply mask to 1D sequence
             h_1d = self.apply_mask(h_1d, mask_1d)
         
-        # Quantize the 1D sequence
-        quant_info, quant_codes, quant_loss = self.quantizer(h_1d)
-        
         # Reshape back to 3D for decoder
-        quant_codes_3d = self.reshape_1d_to_3d(quant_codes, T, H, W)
+        h = self.reshape_1d_to_3d(h_1d, T, H, W)
         
-        return quant_info, quant_codes_3d, quant_loss
+        # Quantize the 1D sequence
+        quant_info, quant_codes, quant_loss = self.quantizer(h)
+        
+        return quant_info, quant_codes, quant_loss
     
-    def decode(self, quant: torch.Tensor) -> torch.Tensor:
+    def decode(self, quant: torch.Tensor, rate_scores: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Decode quantized representation to video.
         
         Args:
@@ -295,8 +292,31 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
         Returns:
             Reconstructed video
         """
+        # TODO: Add attention mask for decoder to mask out the unrelated latent tokens
         quant = self.post_quant_conv(quant)
-        return self.decoder(quant)
+        return self.decoder(quant, encoding_mask=None, attention_mask=None)
+    
+    def encoder_jit(self):
+        return nn.Sequential(
+            OrderedDict(
+                [
+                    ("encoder", self.encoder),
+                    ("quant_conv", self.quant_conv),
+                    ("quantizer", self.quantizer),
+                ]
+            )
+        )
+
+    def decoder_jit(self):
+        return nn.Sequential(
+            OrderedDict(
+                [
+                    ("inv_quant", InvQuantizerJit(self.quantizer)),
+                    ("post_quant_conv", self.post_quant_conv),
+                    ("decoder", self.decoder),
+                ]
+            )
+        )
     
     def decode_code(self, code_b: torch.Tensor) -> torch.Tensor:
         """Decode from discrete codes.
@@ -309,7 +329,7 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
         """
         quant_b = self.quantizer.indices_to_codes(code_b)
         quant_b = self.post_quant_conv(quant_b)
-        return self.decoder(quant_b)
+        return self.decoder(quant_b, encoding_mask=None, attention_mask=None)
     
     def forward(self, input: torch.Tensor, mask_matrix: Optional[torch.Tensor] = None, rate_scores: Optional[torch.Tensor] = None) -> Union[Dict[str, torch.Tensor], NetworkEval]:
         """Forward pass of the tokenizer.
@@ -323,7 +343,7 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
             Dictionary or NetworkEval with reconstructions, quant_loss, and quant_info
         """
         quant_info, quant_codes, quant_loss = self.encode(input, rate_scores)
-        reconstructions = self.decode(quant_codes)
+        reconstructions = self.decode(quant_codes, rate_scores)
         
         if self.training:
             return dict(

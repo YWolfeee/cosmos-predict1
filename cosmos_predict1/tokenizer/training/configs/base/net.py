@@ -217,7 +217,7 @@ AdaptiveDiscreteVideoTokenizerConfig: LazyDict = L(AdaptiveDiscreteVideoTokenize
     quantizer=DiscreteQuantizer.FSQ.name,
     embedding_dim=6,
     levels=[8, 8, 8, 5, 5, 5],
-    encoder=Encoder3DType.FACTORIZED.name,
-    decoder=Decoder3DType.FACTORIZED.name,
+    encoder=Encoder3DType.ViT.name,
+    decoder=Decoder3DType.ViT.name,
     name="AdaptiveDiscreteVideoTokenizer",
 )

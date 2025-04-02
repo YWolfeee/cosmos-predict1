@@ -29,7 +29,7 @@ from cosmos_predict1.tokenizer.training.datasets.video_dataset import Dataset
 from cosmos_predict1.utils.lazy_config import instantiate
 
 _VIDEO_PATTERN_DICT = {
-    "hdvila_video": "datasets/hdvila/videos/*.mp4",
+    "hdvila_video": "datasets/hdvila/videos_orig/*.mp4", # Use videos_org from hdvila in HuggingFace
 }
 
 
