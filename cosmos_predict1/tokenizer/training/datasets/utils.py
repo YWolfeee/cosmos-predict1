@@ -121,6 +121,10 @@ def categorize_aspect_and_store(data_sample):
     H = video_tensor.shape[-2]
     W = video_tensor.shape[-1]
     data_sample["aspect_ratio"] = _pick_closest_aspect_ratio(H, W)
+    if data_sample["is_image"]:
+        data_sample["aspect_ratio"] = "1,1" # NOTICE: To allow batched training of images
+    print(f"is_image? {data_sample['is_image']}") # DEBUG
+    print(f"shape of video_tensor: {video_tensor.shape}") # DEBUG
     return data_sample
 
 

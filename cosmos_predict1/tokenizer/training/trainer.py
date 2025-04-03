@@ -55,8 +55,13 @@ class TokenizerTrainer(Trainer):
             data_batch = misc.to(data_batch, device="cuda")
             self.callbacks.on_validation_step_start(model, data_batch, iteration=iteration)
             output_batch, _ = model.validation_step(data_batch, iteration)
+            if val_iter == 0:
+                input_example = data_batch["video"] # (B, C, T, H, W)
+                output_example = output_batch["prediction"] # (B, C, T, H, W)
+                loss_example = None
             with ema.ema_scope(model, enabled=model.config.ema.enabled):
                 ema_output_batch, loss = model.validation_step(data_batch, iteration, ema_model=True)
                 output_batch.update(ema_output_batch)
             self.callbacks.on_validation_step_end(model, data_batch, output_batch, loss, iteration=iteration)
         self.callbacks.on_validation_end(model, iteration=iteration)
+        return input_example, output_example, loss_example

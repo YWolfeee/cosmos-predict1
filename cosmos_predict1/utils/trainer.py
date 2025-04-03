@@ -16,11 +16,13 @@
 import functools
 import os
 import signal
+import yaml
 
 import torch
 import torch.distributed as dist
 import torch.utils.data
 from megatron.core import parallel_state
+import wandb
 
 from cosmos_predict1.utils import callback, distributed, ema, log, misc
 from cosmos_predict1.utils.checkpointer import Checkpointer
@@ -81,6 +83,9 @@ class Trainer:
             LazyConfig.save_pkl(config, f"{config.job.path_local}/config.pkl")
             # Save the config as .yaml for reading or parsing experiment hyperparameters.
             LazyConfig.save_yaml(config, f"{config.job.path_local}/config.yaml")
+            # Read the saved yaml file and convert it to a dictionary
+            with open(f"{config.job.path_local}/config.yaml", 'r') as f:
+                self.config_dict = yaml.safe_load(f)
         dist.barrier()
         log.init_loguru_file(f"{config.job.path_local}/stdout.log")
         if distributed.is_rank0():
@@ -121,6 +126,16 @@ class Trainer:
             dataloader_train (torch.utils.data.DataLoader): The training data loader.
             dataloader_val (torch.utils.data.DataLoader): The validation data loader.
         """
+        # Initialize wandb for tracking experiments
+        if distributed.is_rank0():
+            print(self.config)
+            wandb.init(
+                project=self.config.job.project,
+                group=self.config.job.group,
+                name=self.config.job.name,
+                config=self.config_dict
+            )
+            
         # Leaving this for backward compability for now, but we can think about moving this to model.on_train_start for all models.
         model = model.to("cuda", memory_format=self.config.trainer.memory_format)  # type: ignore
         model.on_train_start(self.config.trainer.memory_format)
@@ -178,7 +193,9 @@ class Trainer:
                     iteration=iteration,
                     grad_accum_iter=grad_accum_iter,
                 )
-                print(f"After training_step, iteration={iteration}, loss={loss}") # DEBUG
+                # Log loss to wandb
+                if distributed.is_rank0():
+                    wandb.log({"loss": loss.item()}, step=iteration)
                 # Do the following when an actual optimizer (update) step has been made.
                 iteration += 1
                 # Save checkpoint.
@@ -187,7 +204,9 @@ class Trainer:
                 self.callbacks.on_training_step_end(model, data_batch, output_batch, loss, iteration=iteration)
                 # Validation.
                 if self.config.trainer.run_validation and iteration % self.config.trainer.validation_iter == 0:
-                    self.validate(model, dataloader_val, iteration=iteration)
+                    input_example, output_example, _ = self.validate(model, dataloader_val, iteration=iteration)
+                    if distributed.is_rank0():
+                        self.visualize(input_example, output_example, iteration)  
                 # This iteration is successful; reset the timeout signal.
                 signal.alarm(self.config.trainer.timeout_period)
             if _end_training:
@@ -198,6 +217,11 @@ class Trainer:
         self.callbacks.on_train_end(model, iteration=iteration)
         self.checkpointer.finalize()
         distributed.barrier()
+        
+        # Finish wandb run
+        if distributed.is_rank0():
+            wandb.finish()
+            
         self.callbacks.on_app_end()
 
     def training_step(
@@ -276,5 +300,35 @@ class Trainer:
                 data_batch = misc.to(data_batch, device="cuda")
                 self.callbacks.on_validation_step_start(model, data_batch, iteration=iteration)
                 output_batch, loss = model.validation_step(data_batch, iteration)
+                if val_iter == 0:
+                    input_example = data_batch["video"] # (B, C, T, H, W)
+                    output_example = output_batch["prediction"] # (B, C, T, H, W)
+                    loss_example = loss
                 self.callbacks.on_validation_step_end(model, data_batch, output_batch, loss, iteration=iteration)
         self.callbacks.on_validation_end(model, iteration=iteration)
+        return input_example, output_example, loss_example
+    
+    @torch.no_grad()
+    def visualize(self, input_tensor, output_tensor, iteration):
+        """Visualize the input and output tensors.
+        
+        Args:
+            input_tensor (torch.Tensor): The input tensor.
+            output_tensor (torch.Tensor): The output tensor.
+        """
+        # Check if input has 1 channel (grayscale)
+        if input_tensor.shape[1] == 1:
+            # Select first 8 examples (or fewer if batch size is smaller)
+            num_examples = min(8, input_tensor.shape[0])
+            
+            for i in range(num_examples):
+                # Convert tensors to range [0, 1] for PIL
+                # Assuming input_example and output_example are in range [-1, 1]
+                input_img = (input_tensor[i, 0, 0].cpu().detach() + 1) / 2.0  # [H, W] in range [0, 1]
+                output_img = (output_tensor[i, 0, 0].cpu().detach() + 1) / 2.0  # [H, W] in range [0, 1]
+                
+                # Log the pair of images
+                wandb.log({
+                    f"val_example_{i}/input": wandb.Image(input_img.numpy()),
+                    f"val_example_{i}/prediction": wandb.Image(output_img.numpy())
+                }, step=iteration)

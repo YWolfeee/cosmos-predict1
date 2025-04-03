@@ -1217,8 +1217,8 @@ class EncoderViT(nn.Module):
         nn.init.kaiming_normal_(self.is_kept_embed)
         nn.init.kaiming_normal_(self.is_masked_embed)
 
-        # TODO: Add latent tokens & Learnable Positional Embedding
-        # ---------- Latent Tokens ----------
+        # TODO: Add 1D latent tokens & Learnable Positional Embedding
+        # ---------- 1D Latent Tokens & Its Positional Embedding ----------
 
         # ---------- Input Projection ----------
         patch_dim = in_channels * temporal_compression * (spatial_compression ** 2)
@@ -1267,7 +1267,7 @@ class EncoderViT(nn.Module):
         # ---------- 2. Input Projection ----------
         x = self.input_proj(x) # (B, T * H * W, D), D = self.config.hidden_size
 
-        # TODO: Add forward with latent tokens
+        # TODO: Add forward with 1D latent tokens & its positional embedding
         
         # ---------- 3. Add Positional Embedding ----------
         if encoding_mask is not None:

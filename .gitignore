@@ -1,4 +1,5 @@
 checkpoints/
+wandb/
 datasets/
 __pycache__
 apex/

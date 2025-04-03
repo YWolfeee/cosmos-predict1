@@ -37,7 +37,7 @@ from cosmos_predict1.tokenizer.training.configs.base.optim import (
 
 
 def register_training_data(cs):
-    for data_source in ["mock", "hdvila"]:
+    for data_source in ["mock", "hdvila", "imagenet"]: # NOTICE: this required to be registered for imagenet training
         for resolution in ["1080", "720", "480", "360", "256"]:
             cs.store(
                 group="data_train",
@@ -52,7 +52,7 @@ def register_training_data(cs):
 
 
 def register_val_data(cs):
-    for data_source in ["mock", "hdvila"]:
+    for data_source in ["mock", "hdvila", "imagenet"]: # NOTICE: this required to be registered for imagenet training
         for resolution in ["1080", "720", "480", "360", "256"]:
             cs.store(
                 group="data_val",
