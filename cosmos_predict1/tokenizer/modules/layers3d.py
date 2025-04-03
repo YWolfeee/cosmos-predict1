@@ -1075,8 +1075,8 @@ def apply_rotary_emb(q: torch.Tensor, k: torch.Tensor, freqs_cis: torch.Tensor) 
 
     # Properly expand freqs_cis to match the batch and head dimensions
     # [1, seq_len, 1, head_dim//2, 2] -> [bsz, seq_len, n_heads, head_dim//2, 2]
-    print(f"freqs_cis.shape={freqs_cis.shape}") # DEBUG
-    print(f"bsz={bsz}, seq_len={seq_len}, n_heads={n_heads}, head_dim={head_dim}") # DEBUG
+    # print(f"freqs_cis.shape={freqs_cis.shape}") # DEBUG
+    # print(f"bsz={bsz}, seq_len={seq_len}, n_heads={n_heads}, head_dim={head_dim}") # DEBUG
     freqs_cis = freqs_cis.expand(bsz, seq_len, n_heads, head_dim // 2, 2)
     freqs_complex = torch.view_as_complex(freqs_cis.to(torch.float32))
 
