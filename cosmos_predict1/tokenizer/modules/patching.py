@@ -118,7 +118,6 @@ class Patcher3D(Patcher):
             patch_size * torch.ones([1], dtype=torch.int32),
             persistent=_PERSISTENT,
         )
-        self.compression_for_vit = None
 
     def _dwt(self, x, wavelet, mode="reflect", rescale=False):
         dtype = x.dtype
