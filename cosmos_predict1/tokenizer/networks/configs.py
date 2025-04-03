@@ -188,22 +188,10 @@ config = dict(
     num_encoder_layers=4, # smaller for DEBUG, 16 for full
     num_decoder_layers=4, # smaller for DEBUG, 16 for full
     num_attention_heads=16, # smaller for DEBUG, 32 for full
-    max_sequence_length=4096,
+    max_sequence_length=4096, # Not sure about this
     theta=10000.0,
     rms_norm_eps=1e-5,
-    initializer_range=0.02,
-    patch_size=(1, 8, 8), # This patch_size currently is redundant
-    # Additional placeholders from JAX version
-    mask_type='elastic',
-    min_toks=256,
-    max_toks=2048,
-    frames_per_block=1,
-    lpips_loss_ratio=0.1,
-    bottleneck_type='fsq',
-    fsq_quant_levels=(8, 8, 8, 5, 5, 5),
-    vae_bottleneck_dim=8,
-    scan_layers=True,
-    scan_attention=False,
+    initializer_range=0.02
 )
 
 ### TODO: filter out unnecessary parameters here
@@ -216,7 +204,7 @@ adaptive_discrete_video = dict(
     num_res_blocks=2,
     out_channels=3,
     resolution=1024,
-    patch_size=4,
+    patch_size=8,
     patch_method="haar",
     z_channels=256,
     z_factor=1,
@@ -244,4 +232,4 @@ adaptive_discrete_video_8x16x16_720p["spatial_compression"] = 16
 adaptive_discrete_video_4x8x8_360p = dict(adaptive_discrete_video)
 adaptive_discrete_video_4x8x8_360p["temporal_compression"] = 4
 adaptive_discrete_video_4x8x8_360p["spatial_compression"] = 8
-adaptive_discrete_video_4x8x8_360p["patch_size"] = 2
+adaptive_discrete_video_4x8x8_360p["patch_size"] = 4

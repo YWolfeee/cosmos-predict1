@@ -16,7 +16,6 @@
 from hydra.core.config_store import ConfigStore
 
 from cosmos_predict1.tokenizer.training.configs.experiments.utils import create_debug_job_with_mock_data
-from cosmos_predict1.tokenizer.networks.configs import config as vi_config
 from cosmos_predict1.utils import log
 from cosmos_predict1.utils.lazy_config import LazyDict
 

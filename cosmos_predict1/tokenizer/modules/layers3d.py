@@ -31,7 +31,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from loguru import logger as logging
 from einops import rearrange
-from transformers import PretrainedConfig
 
 from cosmos_predict1.tokenizer.modules.patching import Patcher, Patcher3D, UnPatcher, UnPatcher3D
 from cosmos_predict1.tokenizer.modules.utils import (
@@ -972,55 +971,17 @@ class DecoderFactorized(nn.Module):
 # ElasticTokConfig
 # ------------------------------------------------------------------
 
-class ViTConfig(Dict):
-    model_type = "elastic_tok"
-
-    def __init__(
-        self,
-        hidden_size: int = 4096,
-        intermediate_size: int = 11008,
-        num_encoder_layers: int = 16,
-        num_decoder_layers: int = 16,
-        num_attention_heads: int = 32,
-        max_sequence_length: int = 4096,
-        theta: float = 10000.0,
-        rms_norm_eps: float = 1e-5,
-        initializer_range: float = 0.02,
-        patch_size: Tuple[int, int, int] = (1, 8, 8),
-        # Additional placeholders from JAX version
-        mask_type: str = 'elastic',
-        min_toks: int = 256,
-        max_toks: int = 2048,
-        frames_per_block: int = 1,
-        lpips_loss_ratio: float = 0.1,
-        bottleneck_type: str = 'fsq',
-        fsq_quant_levels: Tuple[int, ...] = (8, 8, 8, 5, 5, 5),
-        vae_bottleneck_dim: int = 8,
-        scan_layers: bool = True,
-        scan_attention: bool = False,
-        # ... etc
-        **kwargs
-    ):
-        super().__init__(**kwargs)
-        self.hidden_size = hidden_size
-        self.intermediate_size = intermediate_size
-        self.num_encoder_layers = num_encoder_layers
-        self.num_decoder_layers = num_decoder_layers
-        self.num_attention_heads = num_attention_heads
-        self.max_sequence_length = max_sequence_length
-        self.theta = theta
-        self.rms_norm_eps = rms_norm_eps
-        self.initializer_range = initializer_range
-        self.patch_size = patch_size
-        self.bottleneck_type = bottleneck_type
-        self.vae_bottleneck_dim = vae_bottleneck_dim
-        self.mask_type = mask_type
-        self.min_toks = min_toks
-        self.max_toks = max_toks
-        self.frames_per_block = frames_per_block
-        self.lpips_loss_ratio = lpips_loss_ratio
-        self.scan_layers = scan_layers
-        self.scan_attention = scan_attention
+vit_config = dict(
+    hidden_size=768, # smaller for DEBUG, 4096 for full
+    intermediate_size=768, # smaller for DEBUG, 11008 for full
+    num_encoder_layers=4, # smaller for DEBUG, 16 for full
+    num_decoder_layers=4, # smaller for DEBUG, 16 for full
+    num_attention_heads=16, # smaller for DEBUG, 32 for full
+    max_sequence_length=4096, # Not sure about this
+    theta=10000.0,
+    rms_norm_eps=1e-5,
+    initializer_range=0.02
+)
 
 # ------------------------------------------------------
 # RMSNorm
@@ -1075,8 +1036,6 @@ def apply_rotary_emb(q: torch.Tensor, k: torch.Tensor, freqs_cis: torch.Tensor) 
 
     # Properly expand freqs_cis to match the batch and head dimensions
     # [1, seq_len, 1, head_dim//2, 2] -> [bsz, seq_len, n_heads, head_dim//2, 2]
-    print(f"freqs_cis.shape={freqs_cis.shape}") # DEBUG
-    print(f"bsz={bsz}, seq_len={seq_len}, n_heads={n_heads}, head_dim={head_dim}") # DEBUG
     freqs_cis = freqs_cis.expand(bsz, seq_len, n_heads, head_dim // 2, 2)
     freqs_complex = torch.view_as_complex(freqs_cis.to(torch.float32))
 
@@ -1092,7 +1051,7 @@ def apply_rotary_emb(q: torch.Tensor, k: torch.Tensor, freqs_cis: torch.Tensor) 
 # ------------------------------------------------------
 
 class RotaryMultiheadAttention(nn.Module):
-    def __init__(self, config: ViTConfig):
+    def __init__(self, config: Dict):
         super().__init__()
         self.config = config
         embed_dim = config.hidden_size
@@ -1177,7 +1136,7 @@ class RotaryMultiheadAttention(nn.Module):
 # ------------------------------------------------------------------
 
 class MLP(nn.Module):
-    def __init__(self, config: ViTConfig):
+    def __init__(self, config: Dict):
         super().__init__()
         self.config = config
         self.w1 = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
@@ -1196,7 +1155,7 @@ class MLP(nn.Module):
 # ------------------------------------------------------------------
 
 class TransformerBlock(nn.Module):
-    def __init__(self, config: ViTConfig):
+    def __init__(self, config: Dict):
         super().__init__()
         self.attention_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.ffn_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -1236,7 +1195,7 @@ class EncoderViT(nn.Module):
         # ---------- Config for ElasticTok ----------
         # Notice that some of parameters are redundancy to keep the same interface with the original codebase
         # Apart from settings of Patcher & Quantizer, other parameters are directly inherited from ElasticTokConfig
-        self.config = kwargs.get('config', ViTConfig())
+        self.config = kwargs.get('config', vit_config)
 
         # ---------- Patchify ----------
         self.patch_size = kwargs.get('patch_size', 8)
@@ -1348,7 +1307,7 @@ class DecoderViT(nn.Module):
     ):
         super().__init__()
         # ---------- Config for ElasticTok ----------
-        self.config = kwargs.get('config', ViTConfig())
+        self.config = kwargs.get('config', vit_config)
 
         # ---------- Input Projection ----------
         self.input_proj = nn.Linear(z_channels, self.config.hidden_size, bias=False)

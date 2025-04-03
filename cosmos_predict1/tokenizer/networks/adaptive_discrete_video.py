@@ -171,7 +171,7 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
         decoder_name = kwargs.get("decoder", Decoder3DType.ViT.name)
         self.decoder = Decoder3DType[decoder_name].value(z_channels=z_channels, **kwargs)
         
-        # Convolutional layers for dimensionality transformations
+        # Convolutional layers for dimensionality transformations, treated as MLP
         self.quant_conv = CausalConv3d(z_factor * z_channels, embedding_dim, kernel_size=1, padding=0)
         self.post_quant_conv = CausalConv3d(embedding_dim, z_channels, kernel_size=1, padding=0)
         
