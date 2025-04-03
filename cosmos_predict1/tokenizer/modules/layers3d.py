@@ -1199,11 +1199,12 @@ class EncoderViT(nn.Module):
 
         # ---------- Patchify ----------
         self.patch_size = kwargs.get('patch_size', 8)
+        self.patch_method = kwargs.get('patch_method', "rearrange")
         assert self.patch_size <= spatial_compression
         assert spatial_compression % self.patch_size == 0, f"spatial_compression ({spatial_compression}) must be divisible by patch_size ({self.patch_size}) for proper unpatchification"
         assert self.patch_size == temporal_compression, f"patch_size ({self.patch_size}) must equal temporal_compression ({temporal_compression}) for proper unpatchification"
         # Currently Patcher3D does not support tuple patch_size
-        self.patcher = Patcher3D(patch_size=self.patch_size) 
+        self.patcher = Patcher3D(patch_size=self.patch_size, patch_method=self.patch_method) 
         # We need to further rearange the tokens to satisfy compression rate
         self.extra_spatial_compression = spatial_compression // self.patch_size
         self.extra_temporal_compression = temporal_compression // self.patch_size
