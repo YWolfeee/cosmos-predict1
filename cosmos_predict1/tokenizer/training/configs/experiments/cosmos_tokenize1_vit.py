@@ -15,9 +15,9 @@
 
 from hydra.core.config_store import ConfigStore
 
-from cosmos_predict1.tokenizer.training.configs.experiments.utils import create_debug_job_with_mock_data
 from cosmos_predict1.utils import log
 from cosmos_predict1.utils.lazy_config import LazyDict
+from cosmos_predict1.tokenizer.training.configs.experiments.utils import create_debug_job_with_mock_data
 
 # -------------------------------------------------
 # Hyperparameters of experiments on adaptive tokenization of HDVILA videos
@@ -76,7 +76,7 @@ Adaptive_Tokenize1_ADV8x16x16_720p_HDVILA: LazyDict = LazyDict(
                     spatial_compression=SPATIAL_COMPRESSION, # This should be patch_size*n (n=1,2,...)
                     num_video_frames=NUM_VIDEO_FRAMES,
                     crop_height=CROP_HEIGHT,
-                    config=vit_config,
+                    vit_config=vit_config,
                     min_tokens=MIN_NUM_TOKENS,
                     max_tokens=MAX_NUM_TOKENS, # TODO: Check the relationship with max_sequence_length
                     rate_strategy='uniform'
@@ -154,7 +154,7 @@ Adaptive_Tokenize1_ADV8x16x16_256p_ImageNet: LazyDict = LazyDict(
                     spatial_compression=SPATIAL_COMPRESSION, # This should be patch_size*n (n=1,2,...)
                     num_video_frames=NUM_VIDEO_FRAMES,
                     crop_height=CROP_HEIGHT,
-                    config=vit_config,
+                    vit_config=vit_config,
                     min_tokens=MIN_NUM_TOKENS,
                     max_tokens=MAX_NUM_TOKENS, # TODO: Check the relationship with max_sequence_length
                     rate_strategy='uniform'
