@@ -23,6 +23,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.utils.data
+import torchvision.transforms.functional as F
 from megatron.core import parallel_state
 import wandb
 
@@ -325,7 +326,6 @@ class Trainer:
             print("Start visualization...")
             # Select first 8 examples (or fewer if batch size is smaller)
             num_examples = min(8, input_tensor.shape[0])
-            
             for i in range(num_examples):
                 # Convert and combine images
                 input_img = ((input_tensor[i, :, 0].cpu().detach() + 1) / 2.0).float()
