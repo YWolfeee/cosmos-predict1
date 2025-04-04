@@ -17,6 +17,8 @@ import functools
 import os
 import signal
 import yaml
+from PIL import Image
+import numpy as np
 
 import torch
 import torch.distributed as dist
@@ -195,6 +197,8 @@ class Trainer:
                 )
                 # Log loss to wandb
                 if distributed.is_rank0():
+                    for k, v in output_batch["loss"].items():
+                        wandb.log({k: v.item()}, step=iteration)
                     wandb.log({"loss": loss.item()}, step=iteration)
                 # Do the following when an actual optimizer (update) step has been made.
                 iteration += 1
@@ -318,17 +322,25 @@ class Trainer:
         """
         # Check if input has 1 channel (grayscale)
         if input_tensor.shape[2] == 1: # (B, C, T, H, W)
+            print("Start visualization...")
             # Select first 8 examples (or fewer if batch size is smaller)
             num_examples = min(8, input_tensor.shape[0])
             
             for i in range(num_examples):
-                # Convert tensors to range [0, 1] for PIL
-                # Assuming input_example and output_example are in range [-1, 1]
-                input_img = (input_tensor[i, 0, 0].cpu().detach() + 1) / 2.0  # [H, W] in range [0, 1]
-                output_img = (output_tensor[i, 0, 0].cpu().detach() + 1) / 2.0  # [H, W] in range [0, 1]
+                # Convert and combine images
+                input_img = ((input_tensor[i, :, 0].cpu().detach() + 1) / 2.0).float()
+                output_img = ((output_tensor[i, :, 0].cpu().detach() + 1) / 2.0).float()
+                # Concatenate along width dimension (dim=2 for image tensors with shape [C,H,W])
+                combined_img = torch.cat([input_img, output_img], dim=2).permute(1, 2, 0)
                 
-                # Log the pair of images
+                # Log to wandb
                 wandb.log({
-                    f"val_example_{i}/input": wandb.Image(input_img.numpy()),
-                    f"val_example_{i}/prediction": wandb.Image(output_img.numpy())
+                    f"val_example/gt_vs_pred_{i}": wandb.Image(combined_img.numpy())
                 }, step=iteration)
+                
+                # Save locally
+                save_dir = os.path.join(self.config.job.path_local, "visualizations")
+                os.makedirs(save_dir, exist_ok=True)
+                save_path = os.path.join(save_dir, f"gt_vs_pred_{i}_iter_{iteration}.png")
+                pil_img = Image.fromarray((combined_img.numpy() * 255).astype(np.uint8))
+                pil_img.save(save_path)
