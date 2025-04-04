@@ -113,9 +113,9 @@ MIN_NUM_TOKENS = MAX_NUM_TOKENS // 16 # if MAX_NUM_TOKENS = 4096, MIN_NUM_TOKENS
 vit_config = dict(
     hidden_size=768, # smaller for DEBUG, 4096 for full
     intermediate_size=768, # smaller for DEBUG, 11008 for full
-    num_encoder_layers=4, # smaller for DEBUG, 16 for full
-    num_decoder_layers=4, # smaller for DEBUG, 16 for full
-    num_attention_heads=16, # smaller for DEBUG, 32 for full
+    num_encoder_layers=8, # smaller for DEBUG, 16 for full
+    num_decoder_layers=16, # smaller for DEBUG, 16 for full
+    num_attention_heads=32, # smaller for DEBUG, 32 for full
     max_sequence_length=4096, # Not sure about this
     theta=10000.0,
     rms_norm_eps=1e-5,

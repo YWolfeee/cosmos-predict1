@@ -46,6 +46,9 @@ def get_video_dataset(
 
     h = crop_sizes[_VIDEO_ASPECT_RATIO][1]
     w = crop_sizes[_VIDEO_ASPECT_RATIO][0]
+    if num_video_frames == 1:
+        h = h if h > w else w
+        w = h if h > w else w
 
     def video_fn():
         return 2 * torch.rand(3, num_video_frames, h, w) - 1

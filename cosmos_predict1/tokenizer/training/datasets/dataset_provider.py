@@ -113,12 +113,12 @@ def dataset_entry(
 if __name__ == "__main__":
     # Example usage / quick test
     dataset = dataset_entry(
-        dataset_name="davis_video",
+        dataset_name="imagenet_video",
         dataset_type="video",
         is_train=False,
         resolution="720",
         crop_height=256,
-        num_video_frames=25,
+        num_video_frames=1,
     )
 
     # 2) Print out some basic info:
