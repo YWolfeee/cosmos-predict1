@@ -147,6 +147,8 @@ class CropResizeAugmentor(Augmentor):
         self.crop_op = RandomCrop(input_keys, output_keys, crop_args)
         self.resize_op = ResizeSmallestSideAspectPreserving(input_keys, output_keys, resize_args)
 
+        self.has_warned = False
+
     def __call__(self, data_dict: dict) -> dict:
         r"""Performs random temporal reversing of frames.
 
@@ -162,10 +164,11 @@ class CropResizeAugmentor(Augmentor):
             crop_img_size = obtain_augmentation_size(data_dict, self.crop_args)
             crop_width, crop_height = crop_img_size
             orig_w, orig_h = obtain_image_size(data_dict, self.input_keys)
-            if orig_w < crop_width or orig_h < crop_height:
+            if (orig_w < crop_width or orig_h < crop_height) and not self.has_warned:
                 log.warning(
                     f"Data size ({orig_w}, {orig_h}) is smaller than crop size ({crop_width}, {crop_height}), skip the crop augmentation."
                 )
+                self.has_warned = True
             coin_flip = torch.rand(1).item() <= p
             if coin_flip and crop_width <= orig_w and crop_height <= orig_h:
                 data_dict = self.crop_op(data_dict)

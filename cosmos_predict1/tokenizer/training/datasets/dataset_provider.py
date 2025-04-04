@@ -30,7 +30,7 @@ from cosmos_predict1.utils.lazy_config import instantiate
 
 _VIDEO_PATTERN_DICT = {
     "hdvila_video": "datasets/hdvila/videos/*.mp4", # Use videos_org from hdvila in HuggingFace
-    "imagenet_video": "/mnt/rdata8/imagenet/train/*/*.JPEG" # Use image as video
+    "imagenet_video": "datasets/imagenet/train/*.jpg" # Use image as video
 }
 
 

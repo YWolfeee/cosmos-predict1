@@ -21,6 +21,7 @@ import yaml
 import torch
 import torch.distributed as dist
 import torch.utils.data
+import torchvision.transforms.functional as F
 from megatron.core import parallel_state
 import wandb
 
@@ -194,7 +195,8 @@ class Trainer:
                     grad_accum_iter=grad_accum_iter,
                 )
                 # Log loss to wandb
-                if distributed.is_rank0():
+                if distributed.is_rank0() and iteration % self.config.trainer.logging_iter == 0:
+                    print(f"Iteration={iteration:6d}, loss={loss:.4f}")
                     wandb.log({"loss": loss.item()}, step=iteration)
                 # Do the following when an actual optimizer (update) step has been made.
                 iteration += 1
@@ -317,18 +319,19 @@ class Trainer:
             output_tensor (torch.Tensor): The output tensor.
         """
         # Check if input has 1 channel (grayscale)
-        if input_tensor.shape[1] == 1:
+        # if is image
+        if input_tensor.shape[2] == 1:
+            convert = lambda x: (x[:,:, 0].permute(1, 2, 0).cpu().detach().float() + 1)/2
             # Select first 8 examples (or fewer if batch size is smaller)
             num_examples = min(8, input_tensor.shape[0])
-            
             for i in range(num_examples):
-                # Convert tensors to range [0, 1] for PIL
-                # Assuming input_example and output_example are in range [-1, 1]
-                input_img = (input_tensor[i, 0, 0].cpu().detach() + 1) / 2.0  # [H, W] in range [0, 1]
-                output_img = (output_tensor[i, 0, 0].cpu().detach() + 1) / 2.0  # [H, W] in range [0, 1]
-                
-                # Log the pair of images
-                wandb.log({
-                    f"val_example_{i}/input": wandb.Image(input_img.numpy()),
-                    f"val_example_{i}/prediction": wandb.Image(output_img.numpy())
-                }, step=iteration)
+                input_img = convert(input_tensor[i])
+                output_img = convert(output_tensor[i])
+                img = torch.cat([input_img, output_img], dim=-2)
+                img = F.to_pil_image(img.numpy())
+                wandb.log(
+                    {f"val_example_{i}": wandb.Image(img)}, step=iteration
+                )
+
+        else: # is video
+            raise NotImplementedError("Visualizing video is not implemented yet.")

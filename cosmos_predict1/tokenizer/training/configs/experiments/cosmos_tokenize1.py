@@ -122,13 +122,13 @@ vit_config = dict(
     initializer_range=0.02
 )
 
-Adaptive_Tokenize1_ADV8x16x16_720p_ImageNet: LazyDict = LazyDict(
+Adaptive_Tokenize1_ADV8x16x16_256p_ImageNet: LazyDict = LazyDict(
     dict(
         defaults=[
             "/experiment/video_basic",
             {"override /network": "adaptive_discrete_video"},
-            {"override /data_train": "imagenet_video720"},
-            {"override /data_val": "imagenet_video720"},
+            {"override /data_train": "imagenet_video256"},
+            {"override /data_val": "imagenet_video256"},
             "_self_",
         ],
         dataloader_train=dict(
@@ -164,7 +164,7 @@ Adaptive_Tokenize1_ADV8x16x16_720p_ImageNet: LazyDict = LazyDict(
         job=dict(
             project="posttraining",
             group="tokenizer",
-            name="Adaptive_Tokenize1_ADV8x16x16_720p_ImageNet",
+            name="Adaptive_Tokenize1_ADV8x16x16_256p_ImageNet",
         ),
         checkpoint=dict(
             strict_resume=True,
@@ -382,7 +382,7 @@ for _item in [
     Cosmos_Tokenize1_CV4x8x8_360p_HDVILA,
     Cosmos_Tokenize1_DV4x8x8_360p_HDVILA,
     Adaptive_Tokenize1_ADV8x16x16_720p_HDVILA, # Register this for post-train verification
-    Adaptive_Tokenize1_ADV8x16x16_720p_ImageNet, # Register this for ImageNet training (image-as-video)
+    Adaptive_Tokenize1_ADV8x16x16_256p_ImageNet, # Register this for ImageNet training (image-as-video)
 ]:
     experiment_name = [name for name, value in globals().items() if value is _item][0]
 
