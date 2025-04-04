@@ -1,12 +1,9 @@
 from imaginaire.lazy_config import LazyCall as L
 from imaginaire.lazy_config import LazyDict
 from cosmos_predict1.tokenizer.modules import (
-    ContinuousFormulation,
     Decoder3DType,
-    DecoderType,
     DiscreteQuantizer,
     Encoder3DType,
-    EncoderType,
 )
 
 from cosmos_predict1.tokenizer.networks.adaptive_discrete_video import AdaptiveDiscreteVideoTokenizer

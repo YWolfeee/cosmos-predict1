@@ -85,7 +85,6 @@ class AdaptiveTokenizationModule(nn.Module):
             raise ValueError(f"Unknown rate strategy: {self.rate_strategy}")
         
         # Compute tokens per block
-        total_blocks = batch_size * num_blocks
         min_tokens_per_block = torch.ones_like(allocation_ratios) * self.min_tokens / num_blocks
         remaining_budget = total_token_budget - (self.min_tokens * batch_size)
         
@@ -113,8 +112,6 @@ class AdaptiveTokenizationModule(nn.Module):
             mask: Binary mask of shape [B, T, max_spatial_tokens] 
                   where max_spatial_tokens is the spatial dimension of tokens.
         """
-        # This is a placeholder implementation
-        # Real implementation will depend on the spatial dimension of tokens
         batch_size, num_blocks = tokens_per_block.shape
         max_spatial_tokens = self.max_tokens // num_blocks
         
@@ -242,7 +239,30 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
         # TODO: This is not necessary if we use attention mask
         mask = mask.unsqueeze(1)  # [B, 1, L]
         return x * mask
-    
+
+    def create_causal_attention_mask(self, num_patch_tokens: int, num_latent_tokens: int, num_tokens_per_block: int,use_latent: bool) -> torch.Tensor:
+        """Create a causal mask for the attention layer.
+        
+        Args:
+            num_patch_tokens: Number of patch tokens.
+            num_latent_tokens: Number of latent tokens.
+            use_latent: Whether to use latent tokens.
+        """
+        # Create block indices
+        token_indices = torch.arange(num_patch_tokens)
+        if use_latent:
+            # Each individual latent token can be seem as a block of size 1
+            latent_token_indices = torch.arange(num_latent_tokens) * num_tokens_per_block + num_patch_tokens
+            token_indices = torch.cat([token_indices, latent_token_indices])
+        token_block_ids = token_indices // num_tokens_per_block
+        
+        # For each pair of tokens, mask if source token's block_id < target token's block_id
+        src_block_ids = token_block_ids.unsqueeze(1)  # Shape: [num_patch_tokens, 1]
+        tgt_block_ids = token_block_ids.unsqueeze(0)  # Shape: [1, num_patch_tokens]
+        attn_mask = src_block_ids < tgt_block_ids  # True where we should mask
+        
+        return attn_mask
+
     def encode(self, x: torch.Tensor, rate_scores: Optional[torch.Tensor] = None) -> Tuple[Dict[str, Any], torch.Tensor, torch.Tensor]:
         """Encode input video to discrete tokens.
         
@@ -254,14 +274,14 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
             quant_info: Dictionary with quantization information
             quant_codes: Quantized codes
             quant_loss: Quantization loss
+            clip_shape: Tuple of shape (T, H, W) indicating input video shape
         """
-        # TODO: Add attention mask which is both causal and adaptive
         # Encode input to latent representation
-        h = self.encoder(x, encoding_mask=None, attention_mask=None)
-        h = self.quant_conv(h) # h: (B, embedding_dim, T, H, W)
+        h, clip_shape = self.encoder(x, encoding_mask=None, attention_mask=None, shape_out=True) # clip_shape: (T, H, W)
+        h = self.quant_conv(h) # h: use_latent: (B, embedding_dim, N2, 1, 1); else: (B, embedding_dim, N1, 1, 1)
         
         # Store original 3D shape
-        B, C, T, H, W = h.shape
+        B, C, N, dummy1, dummy2 = h.shape
         
         # Reshape to 1D sequence
         h_1d = self.reshape_3d_to_1d(h)
@@ -276,27 +296,29 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
             h_1d = self.apply_mask(h_1d, mask_1d)
         
         # Reshape back to 3D for decoder
-        h = self.reshape_1d_to_3d(h_1d, T, H, W)
+        h = self.reshape_1d_to_3d(h_1d, N, dummy1, dummy2)
         
         # Quantize the 1D sequence
         quant_info, quant_codes, quant_loss = self.quantizer(h)
         
-        return quant_info, quant_codes, quant_loss
+        return quant_info, quant_codes, quant_loss, clip_shape
     
-    def decode(self, quant: torch.Tensor, rate_scores: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def decode(self, quant: torch.Tensor, rate_scores: Optional[torch.Tensor] = None, clip_shape: Tuple[int, int, int] = None) -> torch.Tensor:
         """Decode quantized representation to video.
         
         Args:
             quant: Quantized tensor of shape [B, C, T, H, W]
+            rate_scores: Optional tensor of shape [B, T] with scores for token allocation
+            clip_shape: Tuple of shape (T, H, W)
             
         Returns:
             Reconstructed video
         """
         # TODO: Add attention mask for decoder to mask out the unrelated latent tokens
         quant = self.post_quant_conv(quant)
-        return self.decoder(quant, encoding_mask=None, attention_mask=None)
+        return self.decoder(quant, encoding_mask=None, attention_mask=None, clip_shape=clip_shape)
     
-    def encoder_jit(self):
+    def encoder_jit(self):  
         return nn.Sequential(
             OrderedDict(
                 [
@@ -342,8 +364,8 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
         Returns:
             Dictionary or NetworkEval with reconstructions, quant_loss, and quant_info
         """
-        quant_info, quant_codes, quant_loss = self.encode(input, rate_scores)
-        reconstructions = self.decode(quant_codes, rate_scores)
+        quant_info, quant_codes, quant_loss, clip_shape = self.encode(input, rate_scores)
+        reconstructions = self.decode(quant_codes, rate_scores, clip_shape)
         
         if self.training:
             return dict(

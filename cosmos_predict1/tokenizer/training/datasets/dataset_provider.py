@@ -31,7 +31,7 @@ from cosmos_predict1.utils.lazy_config import instantiate
 _VIDEO_PATTERN_DICT = {
     "hdvila_video": "datasets/hdvila/videos/*.mp4", # Use videos_org from hdvila in HuggingFace
     "imagenet_video": "/mnt/rdata8/imagenet/train/*/*.JPEG", # Use image as video
-    "imagenet_val_video": "/mnt/rdata8/imagenet/val/*/*.JPEG", # Use image as video
+    "imagenet_val_video": "/mnt/rdata8/imagenet/val/*.JPEG", # Use image as video
 }
 
 
@@ -111,28 +111,60 @@ def dataset_entry(
 
 
 if __name__ == "__main__":
+    import os
+    from PIL import Image
+    import torch
+    import numpy as np
+    
     # Example usage / quick test
     dataset = dataset_entry(
         dataset_name="imagenet_video",
         dataset_type="video",
         is_train=False,
-        resolution="720",
+        resolution="256",
         crop_height=256,
         num_video_frames=1,
     )
 
-    # 2) Print out some basic info:
+    # Print out some basic info:
     print(f"Total samples in dataset: {len(dataset)}")
 
-    # 3) Grab one sample (or a few) to check shapes, keys, etc.
-    if len(dataset) > 0:
-        sample_idx = 0
-        sample = dataset[sample_idx]
-        print(f"Sample index {sample_idx} keys: {list(sample.keys())}")
+    # Create output directory for saving images
+    output_dir = "dataset_samples"
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Visualize the first 8 samples
+    num_samples = min(8, len(dataset))
+    
+    for i in range(num_samples):
+        sample = dataset[i]
+        print(f"Sample index {i} keys: {list(sample.keys())}")
+        
         if "video" in sample:
-            print("Video shape:", sample["video"].shape)
+            video_tensor = sample["video"]
+            print(f"Video shape: {video_tensor.shape}")
+            
+            # For single frame "videos", shape is [C, T, H, W] where T=1
+            # Convert to PIL image: [C, T, H, W] -> [H, W, C]
+            if video_tensor.shape[1] == 1:  # T dimension = 1
+                # Extract the single frame and rearrange dimensions
+                image_tensor = video_tensor[:, 0, :, :]  # [C, H, W]
+                image_np = image_tensor.permute(1, 2, 0).cpu().numpy()  # [H, W, C]
+                image_np = (image_np + 1) / 2  # Normalize to [0,1]
+                
+                # Convert from float [0,1] to uint8 [0,255] if needed
+                if image_np.max() <= 1.0:
+                    image_np = (image_np * 255).astype(np.uint8)
+                
+                # Create and save PIL image
+                image = Image.fromarray(image_np)
+                image_path = os.path.join(output_dir, f"sample_{i}.png")
+                image.save(image_path)
+                print(f"Saved image to {image_path}")
+        
         if "video_name" in sample:
-            print("Video metadata:", sample["video_name"])
-        print("---\nSample loaded successfully.\n")
-    else:
-        print("Dataset has no samples!")
+            print(f"Video metadata: {sample['video_name']}")
+        
+        print("---")
+    
+    print(f"Saved {num_samples} sample images to {output_dir}")

@@ -154,7 +154,7 @@ class RotaryMultiheadAttention(nn.Module):
         # If position_ids is None, assume range(S)
         if position_ids is None:
             position_ids = torch.arange(S, dtype=torch.long, device=hidden_states.device)
-            position_ids = position_ids.unsqueeze(0).expand(B, S)
+            position_ids = position_ids.unsqueeze(0).expand(B, S) # this is not used?
 
         # For advanced usage, you'd gather exact freq for each position, but here we
         # assume sequences are uniform (like Llama).
@@ -235,6 +235,12 @@ class TransformerBlock(nn.Module):
 # EncoderViT
 # ------------------------------------------------------------------
 
+# TODO: handle x with different aspect ratio:
+        #       During video training, x can have varying shapes (e.g., [256, 192] or [256, 256])
+        #       which results in different token counts. We need to handle these variable dimensions.
+        #       This can be implemented by padding dummy tokens & modify attention mask accordingly.
+        #       This should take effect for both EncoderViT & DecoderViT.
+
 class EncoderViT(nn.Module):
     """Vision Transformer Encoder for 3D Video"""
     def __init__(
@@ -247,10 +253,8 @@ class EncoderViT(nn.Module):
     ):
         super().__init__()
 
-        # ---------- Config for ElasticTok ----------
-        # Notice that some of parameters are redundancy to keep the same interface with the original codebase
-        # Apart from settings of Patcher & Quantizer, other parameters are directly inherited from ElasticTokConfig
-        self.config = kwargs.get('config')
+        # ---------- Config for ViT ----------
+        self.vit_config = kwargs.get('vit_config')
 
         # ---------- Patchify ----------
         self.patch_size = kwargs.get('patch_size', 8)
@@ -263,31 +267,37 @@ class EncoderViT(nn.Module):
         # We need to further rearange the tokens to satisfy compression rate
         self.extra_spatial_compression = spatial_compression // self.patch_size
         self.extra_temporal_compression = temporal_compression // self.patch_size
+
+        # ---------- Preprocess Token & Positional Embedding ----------
+        if self.vit_config.use_latent:
+            self.num_patch_tokens = kwargs.get('num_patch_tokens')
+            self.num_latent_tokens = kwargs.get('num_latent_tokens')
+            scale = self.vit_config.hidden_size ** -0.5
+            self.latent_tokens = nn.Parameter(scale * torch.randn(self.num_latent_tokens, self.vit_config.hidden_size))
+            # Additional Positional Embedding to distinguish latent tokens from patch_tokens
+            self.patch_tokens_pos_emb = nn.Parameter(torch.randn(self.num_patch_tokens, self.vit_config.hidden_size))  
+            self.latent_tokens_pos_emb = nn.Parameter(torch.randn(self.num_latent_tokens, self.vit_config.hidden_size))
+            nn.init.kaiming_normal_(self.latent_tokens_pos_emb)
+            nn.init.kaiming_normal_(self.patch_tokens_pos_emb)
+        else: # if not use_latent: not use attention mask but use embed to distinguish masked tokens
+            self.is_kept_embed = nn.Parameter(torch.empty(1, self.vit_config.hidden_size))
+            self.is_masked_embed = nn.Parameter(torch.empty(1, self.vit_config.hidden_size))
+            nn.init.kaiming_normal_(self.is_kept_embed)
+            nn.init.kaiming_normal_(self.is_masked_embed)
         
-        # ---------- Positional Embedding ----------
-        self.crop_height = kwargs.get('crop_height', 256)
-        self.num_video_frames = kwargs.get('num_video_frames', 121)
-        self.is_kept_embed = nn.Parameter(torch.empty(1, self.config.hidden_size))
-        self.is_masked_embed = nn.Parameter(torch.empty(1, self.config.hidden_size))
-        nn.init.kaiming_normal_(self.is_kept_embed)
-        nn.init.kaiming_normal_(self.is_masked_embed)
-
-        # TODO: Add 1D latent tokens & Learnable Positional Embedding
-        # ---------- 1D Latent Tokens & Its Positional Embedding ----------
-
         # ---------- Input Projection ----------
         patch_dim = in_channels * temporal_compression * (spatial_compression ** 2)
-        self.input_proj = nn.Linear(patch_dim, self.config.hidden_size, bias=False)
-        nn.init.normal_(self.input_proj.weight, mean=0.0, std=self.config.initializer_range)
+        self.input_proj = nn.Linear(patch_dim, self.vit_config.hidden_size, bias=False)
+        nn.init.normal_(self.input_proj.weight, mean=0.0, std=self.vit_config.initializer_range)
 
         # ---------- Transformer Blocks ----------
-        num_layers = getattr(self.config, 'num_encoder_layers')
-        self.blocks = nn.ModuleList([TransformerBlock(self.config) for _ in range(num_layers)])
+        num_layers = getattr(self.vit_config, 'num_encoder_layers')
+        self.blocks = nn.ModuleList([TransformerBlock(self.vit_config) for _ in range(num_layers)])
         
         # ---------- Output Projection ----------
-        self.norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
-        self.output_proj = nn.Linear(self.config.hidden_size, z_channels, bias=False)
-        nn.init.normal_(self.output_proj.weight, mean=0.0, std=self.config.initializer_range)
+        self.norm = RMSNorm(self.vit_config.hidden_size, eps=self.vit_config.rms_norm_eps)
+        self.output_proj = nn.Linear(self.vit_config.hidden_size, z_channels, bias=False)
+        nn.init.normal_(self.output_proj.weight, mean=0.0, std=self.vit_config.initializer_range)
 
     def forward(self, 
                 x: torch.Tensor,         # [B, S, hidden_size]
@@ -295,14 +305,19 @@ class EncoderViT(nn.Module):
                 attention_mask: torch.Tensor = None, # [B, S] float
                 position_ids: Optional[torch.Tensor] = None,
                 cache: Optional[Dict[str, torch.Tensor]] = None,
-                training: bool = True) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        # Input shape: (B, _C, _T, _H, _W), prepatchified
-        # _C = 3, _T = self.num_video_frames 
-        # _H = self.crop_height * h, _W = self.crop_height * w, h, w <= 1
+                shape_out: bool = False) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        # Input shape: (B, C', T', H', W')
+        # Where:
+        #   B = batch size
+        #   C' = number of channels (3 for RGB)
+        #   T' = number of frames (equals kwargs.get('num_video_frames', 121) in __init__)
+        #   H' = height of frames (equals kwargs.get('crop_height', 256) in __init__)
+        #   W' = width of frames (equals kwargs.get('crop_width', 256) in __init__)
+        # Note: This is the raw input before any patchification is applied
         B = x.shape[0]
 
         # ---------- 1.Patchify to 1D ---------- 
-        x = self.patcher(x)  # (B, _C * patch_size**3, _T / patch_size, _H / patch_size, _W / patch_size)
+        x = self.patcher(x)  # (B, C' * patch_size**3, T' / patch_size, H' / patch_size, W' / patch_size)
         ### Further rearange the token to satisfy compression rate
         if self.extra_spatial_compression > 1 or self.extra_temporal_compression > 1:
             x = rearrange(
@@ -312,7 +327,7 @@ class EncoderViT(nn.Module):
                 p2=self.extra_spatial_compression,
                 p3=self.extra_spatial_compression,
             ).contiguous() 
-        # x: (B, _C * (sc ** 2) * tc, _T / tc, _H / sc, _W / sc), postpatchified
+        # x: (B, C' * (sc ** 2) * tc, T' / tc, H' / sc, W' / sc), postpatchified
         # sc: spatial_compression; tc: temporal_compression
         B, C, T, H, W = x.shape
         ### Flatten the spatial and temporal dimensions
@@ -320,12 +335,15 @@ class EncoderViT(nn.Module):
         x = x.permute(0, 2, 1) # (B, T * H * W, C)
         
         # ---------- 2. Input Projection ----------
-        x = self.input_proj(x) # (B, T * H * W, D), D = self.config.hidden_size
+        x = self.input_proj(x) # (B, N1, D), N1 = T * H * W, D = self.config.hidden_size
 
-        # TODO: Add forward with 1D latent tokens & its positional embedding
-        
-        # ---------- 3. Add Positional Embedding ----------
-        if encoding_mask is not None:
+        # ---------- 3. Preprocess Token & Positional Embedding ----------
+        if self.vit_config.use_latent:
+            x = x + self.patch_tokens_pos_emb.unsqueeze(0) # [B, N1, D]
+            latent_x = self.latent_tokens + self.latent_tokens_pos_emb # [N2, D]
+            latent_x = latent_x.unsqueeze(0).repeat(B, 1, 1)  # [B, N2, D]
+            x = torch.cat([x, latent_x], dim=1)  # [B, N1+N2, D]
+        elif encoding_mask is not None:
             keep_embed = self.is_kept_embed.unsqueeze(1)  # (1, 1, hidden_size)
             mask_embed = self.is_masked_embed.unsqueeze(1)  # (1, 1, hidden_size)
             x = x + torch.where(encoding_mask.unsqueeze(-1), keep_embed, mask_embed)
@@ -337,19 +355,22 @@ class EncoderViT(nn.Module):
                 attention_mask=attention_mask,
                 position_ids=position_ids,
                 cache=cache
-            )  # Maintains shape # (B, T * H * W, D)
-
-        # TODO: Extract latent tokens
+            )  # Maintains shape # use_latent: (B, N1+N2, D); else: (B, N1, D)
         
         # ---------- 5. Output Projection ----------
-        x = self.norm(x)  # (B, T * H * W, D)
-        x = self.output_proj(x)  # (B, T * H * W, z_channels)
+        if self.vit_config.use_latent:
+            x = x[:, -self.num_latent_tokens:, :]
+        x = self.norm(x)  # use_latent: (B, N2, D); else: (B, N1, D)
+        x = self.output_proj(x)  # use_latent: (B, N2, z_channels); else: (B, N1, z_channels)
+
+        # ---------- 6. Reshape to Pesudo 3D ----------
+        x = x.permute(0, 2, 1) # (B, z_channels, N1)
+        x = x.reshape(B, x.shape[1], x.shape[2], 1, 1) # (B, z_channels, N1, 1, 1)
         
-        # ---------- 6. Reshape to 3D ----------
-        ### To match original bodebase format
-        x = x.permute(0, 2, 1)  # (B, z_channels, T * H * W)
-        x = x.reshape(B, -1, T, H, W)  # (B, z_channels, T, H, W)
-        return x
+        if shape_out:
+            return x, (T, H, W)
+        else:
+            return x
 
 class DecoderViT(nn.Module):
     """Vision Transformer Decoder for 3D Video"""
@@ -362,32 +383,40 @@ class DecoderViT(nn.Module):
         **kwargs
     ):
         super().__init__()
-        # ---------- Config for ElasticTok ----------
-        self.config = kwargs.get('config')
+        # ---------- Config for ViT ----------
+        self.vit_config = kwargs.get('vit_config')
+        self.default_num_video_frames = kwargs.get('num_video_frames', 121)
+        self.default_video_height = kwargs.get('crop_height', 256)
 
         # ---------- Input Projection ----------
-        self.input_proj = nn.Linear(z_channels, self.config.hidden_size, bias=False)
-        nn.init.normal_(self.input_proj.weight, mean=0.0, std=self.config.initializer_range)
+        self.input_proj = nn.Linear(z_channels, self.vit_config.hidden_size, bias=False)
+        nn.init.normal_(self.input_proj.weight, mean=0.0, std=self.vit_config.initializer_range)
 
-        # ---------- Positional Embedding ----------
-        self.crop_height = kwargs.get('crop_height', 256)
-        self.num_video_frames = kwargs.get('num_video_frames', 121)
-        self.is_kept_embed = nn.Parameter(torch.empty(1, self.config.hidden_size))
-        self.is_masked_embed = nn.Parameter(torch.empty(1, self.config.hidden_size))
-        nn.init.kaiming_normal_(self.is_kept_embed)
-        nn.init.kaiming_normal_(self.is_masked_embed)
-
-        # TODO: Add masked tokens & Learnable Positional Embedding
+        # ---------- Preprocess Token & Positional Embedding ----------
+        if self.vit_config.use_latent:
+            self.num_patch_tokens = kwargs.get('num_patch_tokens')
+            self.num_latent_tokens = kwargs.get('num_latent_tokens')
+            scale = self.vit_config.hidden_size ** -0.5
+            self.mask_token = nn.Parameter(scale * torch.randn(1, self.vit_config.hidden_size))
+            self.patch_tokens_pos_emb = nn.Parameter(torch.randn(self.num_patch_tokens, self.vit_config.hidden_size))
+            self.latent_tokens_pos_emb = nn.Parameter(torch.randn(self.num_latent_tokens, self.vit_config.hidden_size))
+            nn.init.kaiming_normal_(self.latent_tokens_pos_emb)
+            nn.init.kaiming_normal_(self.patch_tokens_pos_emb)
+        else:
+            self.is_kept_embed = nn.Parameter(torch.empty(1, self.vit_config.hidden_size))
+            self.is_masked_embed = nn.Parameter(torch.empty(1, self.vit_config.hidden_size))
+            nn.init.kaiming_normal_(self.is_kept_embed)
+            nn.init.kaiming_normal_(self.is_masked_embed)
 
         # ---------- Transformer Blocks ----------
-        num_layers = getattr(self.config, 'num_encoder_layers')
-        self.blocks = nn.ModuleList([TransformerBlock(self.config) for _ in range(num_layers)])
+        num_layers = getattr(self.vit_config, 'num_encoder_layers')
+        self.blocks = nn.ModuleList([TransformerBlock(self.vit_config) for _ in range(num_layers)])
         
         # ---------- Output Projection ----------
-        self.norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
+        self.norm = RMSNorm(self.vit_config.hidden_size, eps=self.vit_config.rms_norm_eps)
         out_channels = out_channels * (spatial_compression ** 2) * temporal_compression
-        self.output_proj = nn.Linear(self.config.hidden_size, out_channels, bias=False)
-        nn.init.normal_(self.output_proj.weight, mean=0.0, std=self.config.initializer_range)
+        self.output_proj = nn.Linear(self.vit_config.hidden_size, out_channels, bias=False)
+        nn.init.normal_(self.output_proj.weight, mean=0.0, std=self.vit_config.initializer_range)
 
         # ---------- Unpatchify ----------
         self.patch_size = kwargs.get('patch_size', 8)
@@ -403,28 +432,37 @@ class DecoderViT(nn.Module):
     def forward(
             self, 
             x: torch.Tensor,
+            clip_shape: Tuple[int, int, int] = None,
             encoding_mask: Optional[torch.Tensor] = None,
             attention_mask: Optional[torch.Tensor] = None,
             position_ids: Optional[torch.Tensor] = None,
-            cache: Optional[Dict[str, torch.Tensor]] = None,
-            training: bool = True) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        # Input shape: (B, z_channels, T, H, W)
-        B, C, T, H, W = x.shape
-        
+            cache: Optional[Dict[str, torch.Tensor]] = None) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        # Input shape: use_latent: (B, z_channels, N2, 1, 1); else: (B, z_channels, N1, 1, 1)
+        B, C, N, _, _ = x.shape # Dummy Feature Map: (B, C, N, 1, 1)
+        if clip_shape is None:
+            # Calculate dimensions based on compression factors
+            default_t = self.default_num_video_frames // self.extra_temporal_compression
+            default_h = self.default_video_height // self.extra_spatial_compression
+            default_w = self.default_video_height // self.extra_spatial_compression
+            clip_shape = (default_t, default_h, default_w)
+        T, H, W = clip_shape
+
         # ---------- 1. Reshape to 1D ----------
-        x = x.reshape(B, C, -1)  # (B, z_channels, T*H*W)
-        x = x.permute(0, 2, 1)  # (B, T*H*W, z_channels)
+        x = x.reshape(B, N, -1)  # use_latent: (B, N2, z_channels); else: (B, N1, z_channels)
         
         # ---------- 2. Input Projection ----------
-        x = self.input_proj(x)  # (B, T*H*W, hidden_size)
+        x = self.input_proj(x)  # use_latent: (B, N2, hidden_size); else: (B, N1, hidden_size)
         
-        # ---------- 3. Add Positional Embedding ----------
-        if encoding_mask is not None:
+        # ---------- 3. Preprocess Token & Positional Embedding ----------
+        if self.vit_config.use_latent:
+            x = x + self.latent_tokens_pos_emb.unsqueeze(0) # [B, N2, D]
+            masked_x = self.mask_token + self.patch_tokens_pos_emb # [N1, D]
+            masked_x = masked_x.unsqueeze(0).repeat(B, 1, 1) # [B, N1, D]
+            x = torch.cat([masked_x, x], dim=1) # [B, N1+N2, D], the concatenate order is to ensure attention mask is as the same as EncoderViT
+        elif encoding_mask is not None: # use patch_only
             keep_embed = self.is_kept_embed.unsqueeze(1)  # (1, 1, hidden_size)
             mask_embed = self.is_masked_embed.unsqueeze(1)  # (1, 1, hidden_size)
             x = x + torch.where(encoding_mask.unsqueeze(-1), keep_embed, mask_embed)
-
-        # TODO: Add forward concatenated with latent tokens
         
         # ---------- 4. Transformer Forward ----------
         for blk in self.blocks:
@@ -433,13 +471,13 @@ class DecoderViT(nn.Module):
                 attention_mask=attention_mask,
                 position_ids=position_ids,
                 cache=cache
-            )  # Maintains shape (B, T*H*W, hidden_size)
+            )  # Maintains shape: use_latent: (B, N1+N2, hidden_size); else: (B, N1, hidden_size)
         
         # ---------- 5. Output Projection ----------
-        x = self.norm(x)  # (B, T*H*W, hidden_size)
-        x = self.output_proj(x)  # (B, T*H*W, out_channels*patch_size^3)
-
-        # TODO: Extract masked tokens
+        if self.vit_config.use_latent:
+            x = x[:, :self.num_patch_tokens, :]
+        x = self.norm(x)  # use_latent: (B, N1, hidden_size)
+        x = self.output_proj(x)  # use_latent: (B, N1, out_channels*patch_size^3);
         
         # ---------- 6. Unpatchify to 3D ----------
         x = x.permute(0, 2, 1)  # (B, out_channels*patch_size^3, T*H*W)

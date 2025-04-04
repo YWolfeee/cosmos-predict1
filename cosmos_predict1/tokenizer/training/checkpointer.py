@@ -138,10 +138,12 @@ class TokenizerCheckpointer(Checkpointer):
 
             ema_jit = torch.jit.trace(_model, example_input, strict=self.config_jit.strict)
             encoder_jit = torch.jit.trace(_model.encoder_jit(), example_input, strict=self.config_jit.strict)
+            print("example_input.shape", example_input.shape)
             decoder_example = encoder_jit(example_input)
             if isinstance(decoder_example, tuple):
                 decoder_example = decoder_example[0]
             else:
                 assert isinstance(decoder_example, torch.Tensor), "decoder_example should be a tensor or tuple"
+            print("decoder_example.shape", decoder_example.shape)
             decoder_jit = torch.jit.trace(_model.decoder_jit(), decoder_example, strict=self.config_jit.strict)
         return {"ema": ema_jit, "enc": encoder_jit, "dec": decoder_jit}
