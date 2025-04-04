@@ -317,7 +317,7 @@ class Trainer:
             output_tensor (torch.Tensor): The output tensor.
         """
         # Check if input has 1 channel (grayscale)
-        if input_tensor.shape[1] == 1:
+        if input_tensor.shape[2] == 1: # (B, C, T, H, W)
             # Select first 8 examples (or fewer if batch size is smaller)
             num_examples = min(8, input_tensor.shape[0])
             
