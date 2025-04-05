@@ -34,6 +34,9 @@ class TokenizerModel(Model):
         super().__init__()
         self.config = config
         self.network = instantiate(config.network)
+        # count the number of parameters in the network
+        self.num_params = sum(p.numel() for p in self.network.parameters())
+        print(f"Number of parameters in the network: {self.num_params}")
         self.loss = instantiate(config.loss)
         self.metric = instantiate(config.metric)
         self.precision = getattr(torch, config.precision)
