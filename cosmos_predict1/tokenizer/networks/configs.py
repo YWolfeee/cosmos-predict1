@@ -181,18 +181,6 @@ discrete_video_4x8x8_360p["temporal_compression"] = 4
 discrete_video_4x8x8_360p["spatial_compression"] = 8
 discrete_video_4x8x8_360p["patch_size"] = 2
 
-# TODO: Check, this might be redundant
-config = dict(
-    hidden_size=4096,
-    intermediate_size=11008,
-    num_encoder_layers=16,
-    num_decoder_layers=16,
-    num_attention_heads=32,
-    max_sequence_length=4096,
-    theta=10000.0,
-    rms_norm_eps=1e-5,
-    initializer_range=0.02
-)
 
 ### TODO: filter out unnecessary parameters here
 adaptive_discrete_video = dict(
@@ -222,7 +210,6 @@ adaptive_discrete_video = dict(
     encoder=Encoder3DType.ViT.name,
     decoder=Decoder3DType.ViT.name,
     name="ADV",
-    config=config, # This is important to utilize settings from OURs
 )
 
 adaptive_discrete_video_8x16x16_720p = dict(adaptive_discrete_video)

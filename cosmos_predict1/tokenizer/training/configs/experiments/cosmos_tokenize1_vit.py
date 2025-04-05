@@ -115,16 +115,16 @@ min_num_tokens = num_latent_tokens // 16
 # ------------ ViT backbone config ------------
 
 vit_config = dict(
-    hidden_size=768,
-    intermediate_size=3072,
-    num_encoder_layers=8,
-    num_decoder_layers=16,
+    hidden_size=1024,
+    intermediate_size=2048,
+    num_encoder_layers=10,
+    num_decoder_layers=10,
     num_attention_heads=16,
     max_sequence_length=4096,
     theta=10000.0,
     rms_norm_eps=1e-5,
     initializer_range=0.02,
-    use_latent=True
+    use_latent=False
 )
 
 Adaptive_Tokenize1_ADV8x16x16_256p_ImageNet: LazyDict = LazyDict(
