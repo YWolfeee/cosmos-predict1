@@ -1,5 +1,5 @@
-from imaginaire.lazy_config import LazyCall as L
-from imaginaire.lazy_config import LazyDict
+from cosmos_predict1.utils.lazy_config import LazyCall as L
+from cosmos_predict1.utils.lazy_config import LazyDict
 from cosmos_predict1.tokenizer.modules import (
     ContinuousFormulation,
     Decoder3DType,

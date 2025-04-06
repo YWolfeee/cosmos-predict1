@@ -26,6 +26,8 @@ from cosmos_predict1.tokenizer.training.configs.base.net import (
     CausalDiscreteFactorizedVideoTokenizerConfig,
     ContinuousImageTokenizerConfig,
     DiscreteImageTokenizerConfig,
+)
+from cosmos_predict1.tokenizer.training.configs.base.net_vit import (
     AdaptiveDiscreteVideoTokenizerConfig,
 )
 from cosmos_predict1.tokenizer.training.configs.base.optim import (

@@ -250,7 +250,7 @@ class EncoderViT(nn.Module):
         # ---------- Config for ElasticTok ----------
         # Notice that some of parameters are redundancy to keep the same interface with the original codebase
         # Apart from settings of Patcher & Quantizer, other parameters are directly inherited from ElasticTokConfig
-        self.config = kwargs.get('config')
+        self.config = kwargs.get('vit_config')
 
         # ---------- Patchify ----------
         self.patch_size = kwargs.get('patch_size', 8)
@@ -363,7 +363,7 @@ class DecoderViT(nn.Module):
     ):
         super().__init__()
         # ---------- Config for ElasticTok ----------
-        self.config = kwargs.get('config')
+        self.config = kwargs.get('vit_config')
 
         # ---------- Input Projection ----------
         self.input_proj = nn.Linear(z_channels, self.config.hidden_size, bias=False)
