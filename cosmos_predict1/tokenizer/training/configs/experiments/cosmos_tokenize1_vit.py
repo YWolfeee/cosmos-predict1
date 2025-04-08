@@ -162,7 +162,8 @@ ADV8x16x16_256p_ImageNet_Posttrain: LazyDict = LazyDict(
                     max_tokens=max_num_tokens,
                     num_patch_tokens=num_patch_tokens,
                     num_latent_tokens=num_latent_tokens,
-                    rate_strategy='uniform'
+                    rate_strategy='uniform',
+                    use_latent_tokens=False,
                 )
             )
         ),

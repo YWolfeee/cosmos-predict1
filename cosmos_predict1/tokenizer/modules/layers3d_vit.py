@@ -272,8 +272,16 @@ class EncoderViT(nn.Module):
         nn.init.kaiming_normal_(self.is_kept_embed)
         nn.init.kaiming_normal_(self.is_masked_embed)
 
-        # TODO: Add 1D latent tokens & Learnable Positional Embedding
         # ---------- 1D Latent Tokens & Its Positional Embedding ----------
+        self.use_latent_tokens = kwargs.get('use_latent_tokens', False)
+        if self.use_latent_tokens:
+            self.num_patch_tokens = kwargs.get('num_patch_tokens')
+            self.num_latent_tokens = kwargs.get('num_latent_tokens')
+            scale = self.config.hidden_size ** -0.5
+            self.latent_tokens = nn.Parameter(scale * torch.randn(self.num_latent_tokens, self.config.hidden_size))
+            # Additional Positional Embedding to distinguish latent tokens from patch_tokens
+            self.patch_tokens_pos_emb = nn.Parameter(scale * torch.randn(self.num_patch_tokens, self.config.hidden_size))  
+            self.latent_tokens_pos_emb = nn.Parameter(scale * torch.randn(self.num_latent_tokens, self.config.hidden_size))
 
         # ---------- Input Projection ----------
         patch_dim = in_channels * temporal_compression * (spatial_compression ** 2)
@@ -322,7 +330,11 @@ class EncoderViT(nn.Module):
         # ---------- 2. Input Projection ----------
         x = self.input_proj(x) # (B, T * H * W, D), D = self.config.hidden_size
 
-        # TODO: Add forward with 1D latent tokens & its positional embedding
+        if self.use_latent_tokens:
+            x = x + self.patch_tokens_pos_emb.unsqueeze(0) # [B, N1, D]
+            latent_x = self.latent_tokens + self.latent_tokens_pos_emb # [N2, D]
+            latent_x = latent_x.unsqueeze(0).repeat(B, 1, 1)  # [B, N2, D]
+            x = torch.cat([x, latent_x], dim=1)  # [B, N1+N2, D]
         
         # ---------- 3. Add Positional Embedding ----------
         if encoding_mask is not None:
@@ -338,18 +350,24 @@ class EncoderViT(nn.Module):
                 position_ids=position_ids,
                 cache=cache
             )  # Maintains shape # (B, T * H * W, D)
-
-        # TODO: Extract latent tokens
+        
+        # Extract latent tokens
+        if self.use_latent_tokens:
+            x = x[:, -self.num_latent_tokens:, :]
         
         # ---------- 5. Output Projection ----------
         x = self.norm(x)  # (B, T * H * W, D)
         x = self.output_proj(x)  # (B, T * H * W, z_channels)
         
         # ---------- 6. Reshape to 3D ----------
-        ### To match original bodebase format
+        ### To match original codebase format
         x = x.permute(0, 2, 1)  # (B, z_channels, T * H * W)
-        x = x.reshape(B, -1, T, H, W)  # (B, z_channels, T, H, W)
-        return x
+        if self.use_latent_tokens:
+            x = x.reshape(B, x.shape[1], x.shape[2], 1, 1)
+        else:
+            x = x.reshape(B, -1, T, H, W)  # (B, z_channels, T, H, W)
+        
+        return x, (T, H, W)
 
 class DecoderViT(nn.Module):
     """Vision Transformer Decoder for 3D Video"""
@@ -377,7 +395,16 @@ class DecoderViT(nn.Module):
         nn.init.kaiming_normal_(self.is_kept_embed)
         nn.init.kaiming_normal_(self.is_masked_embed)
 
-        # TODO: Add masked tokens & Learnable Positional Embedding
+        # ---------- 1D Latent Tokens & Its Positional Embedding ----------
+        self.use_latent_tokens = kwargs.get('use_latent_tokens', False)
+        if self.use_latent_tokens:
+            self.num_patch_tokens = kwargs.get('num_patch_tokens')
+            self.num_latent_tokens = kwargs.get('num_latent_tokens')
+            scale = self.config.hidden_size ** -0.5
+            self.mask_token = nn.Parameter(scale * torch.randn(1, self.config.hidden_size))
+            # Additional Positional Embedding to distinguish latent tokens from patch_tokens
+            self.patch_tokens_pos_emb = nn.Parameter(scale * torch.randn(self.num_patch_tokens, self.config.hidden_size))  
+            self.latent_tokens_pos_emb = nn.Parameter(scale * torch.randn(self.num_latent_tokens, self.config.hidden_size))
 
         # ---------- Transformer Blocks ----------
         num_layers = getattr(self.config, 'num_encoder_layers')
@@ -403,13 +430,14 @@ class DecoderViT(nn.Module):
     def forward(
             self, 
             x: torch.Tensor,
+            patch_shape: Tuple[int, int, int] = None,
             encoding_mask: Optional[torch.Tensor] = None,
             attention_mask: Optional[torch.Tensor] = None,
             position_ids: Optional[torch.Tensor] = None,
             cache: Optional[Dict[str, torch.Tensor]] = None,
             training: bool = True) -> Tuple[torch.Tensor, Dict[str, Any]]:
         # Input shape: (B, z_channels, T, H, W)
-        B, C, T, H, W = x.shape
+        B, C, _, _, _ = x.shape
         
         # ---------- 1. Reshape to 1D ----------
         x = x.reshape(B, C, -1)  # (B, z_channels, T*H*W)
@@ -417,14 +445,18 @@ class DecoderViT(nn.Module):
         
         # ---------- 2. Input Projection ----------
         x = self.input_proj(x)  # (B, T*H*W, hidden_size)
+
+        if self.use_latent_tokens:
+            x = x + self.latent_tokens_pos_emb.unsqueeze(0)  # (B, N2, D)
+            masked_x = self.mask_token + self.patch_tokens_pos_emb  # (N1, D)
+            masked_x = masked_x.unsqueeze(0).repeat(B, 1, 1)  # (B, N1, D)
+            x = torch.cat([masked_x, x], dim=1)  # (B, N1+N2, D)
         
         # ---------- 3. Add Positional Embedding ----------
         if encoding_mask is not None:
             keep_embed = self.is_kept_embed.unsqueeze(1)  # (1, 1, hidden_size)
             mask_embed = self.is_masked_embed.unsqueeze(1)  # (1, 1, hidden_size)
             x = x + torch.where(encoding_mask.unsqueeze(-1), keep_embed, mask_embed)
-
-        # TODO: Add forward concatenated with latent tokens
         
         # ---------- 4. Transformer Forward ----------
         for blk in self.blocks:
@@ -439,11 +471,12 @@ class DecoderViT(nn.Module):
         x = self.norm(x)  # (B, T*H*W, hidden_size)
         x = self.output_proj(x)  # (B, T*H*W, out_channels*patch_size^3)
 
-        # TODO: Extract masked tokens
+        if self.use_latent_tokens:
+            x = x[:, :self.num_patch_tokens, :]  # (B, N1, out_channels*patch_size^3)
         
         # ---------- 6. Unpatchify to 3D ----------
         x = x.permute(0, 2, 1)  # (B, out_channels*patch_size^3, T*H*W)
-        x = x.reshape(B, -1, T, H, W)  # (B, out_channels*patch_size^3, T, H, W)
+        x = x.reshape(B, -1, *patch_shape)  # (B, out_channels*patch_size^3, T, H, W)
         if self.extra_spatial_compression > 1 or self.extra_temporal_compression > 1:
             x = rearrange(
                 x,

@@ -257,7 +257,7 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
         """
         # TODO: Add attention mask which is both causal and adaptive
         # Encode input to latent representation
-        h = self.encoder(x, encoding_mask=None, attention_mask=None)
+        h, patch_shape = self.encoder(x, encoding_mask=None, attention_mask=None)
         h = self.quant_conv(h) # h: (B, embedding_dim, T, H, W)
         
         # Store original 3D shape
@@ -281,9 +281,9 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
         # Quantize the 1D sequence
         quant_info, quant_codes, quant_loss = self.quantizer(h)
         
-        return quant_info, quant_codes, quant_loss
+        return quant_info, quant_codes, quant_loss, patch_shape
     
-    def decode(self, quant: torch.Tensor, rate_scores: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def decode(self, quant: torch.Tensor, rate_scores: Optional[torch.Tensor] = None, patch_shape=None) -> torch.Tensor:
         """Decode quantized representation to video.
         
         Args:
@@ -294,7 +294,7 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
         """
         # TODO: Add attention mask for decoder to mask out the unrelated latent tokens
         quant = self.post_quant_conv(quant)
-        return self.decoder(quant, encoding_mask=None, attention_mask=None)
+        return self.decoder(quant, encoding_mask=None, attention_mask=None, patch_shape=patch_shape)
     
     def encoder_jit(self):
         return nn.Sequential(
@@ -329,6 +329,7 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
         """
         quant_b = self.quantizer.indices_to_codes(code_b)
         quant_b = self.post_quant_conv(quant_b)
+        # TODO: Currently not supported by 1D tokenizer since patch_shape is not given
         return self.decoder(quant_b, encoding_mask=None, attention_mask=None)
     
     def forward(self, input: torch.Tensor, mask_matrix: Optional[torch.Tensor] = None, rate_scores: Optional[torch.Tensor] = None) -> Union[Dict[str, torch.Tensor], NetworkEval]:
@@ -342,8 +343,8 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
         Returns:
             Dictionary or NetworkEval with reconstructions, quant_loss, and quant_info
         """
-        quant_info, quant_codes, quant_loss = self.encode(input, rate_scores)
-        reconstructions = self.decode(quant_codes, rate_scores)
+        quant_info, quant_codes, quant_loss, patch_shape = self.encode(input, rate_scores)
+        reconstructions = self.decode(quant_codes, rate_scores, patch_shape)
         
         if self.training:
             return dict(

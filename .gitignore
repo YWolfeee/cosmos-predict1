@@ -4,5 +4,7 @@ datasets/
 __pycache__
 apex/
 Video_Tokenization.ipynb
+temp_code/
+.vscode/
 *.e*
 *.o*
