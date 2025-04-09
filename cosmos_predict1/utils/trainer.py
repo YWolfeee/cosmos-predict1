@@ -321,7 +321,7 @@ class Trainer:
         # Check if input has 1 channel (grayscale)
         # if is image
         if input_tensor.shape[2] == 1:
-            convert = lambda x: (x[:,:, 0].permute(1, 2, 0).cpu().detach().float() + 1)/2
+            convert = lambda x: ((x[:,:, 0].permute(1, 2, 0).cpu().detach().float() + 1)/2).clamp(0, 1)
             # Select first 8 examples (or fewer if batch size is smaller)
             num_examples = min(8, input_tensor.shape[0])
             for i in range(num_examples):
