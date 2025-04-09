@@ -19,7 +19,7 @@ from cosmos_predict1.tokenizer.modules.distributions import GaussianDistribution
 from cosmos_predict1.tokenizer.modules.layers2d import Decoder, Encoder
 from cosmos_predict1.tokenizer.modules.layers3d import DecoderBase, DecoderFactorized, EncoderBase, EncoderFactorized
 from cosmos_predict1.tokenizer.modules.layers3d_vit import EncoderViT, DecoderViT
-from cosmos_predict1.tokenizer.modules.quantizers import FSQuantizer, LFQuantizer, ResidualFSQuantizer, VectorQuantizer
+from cosmos_predict1.tokenizer.modules.quantizers import FSQuantizer, LFQuantizer, ResidualFSQuantizer, VectorQuantizer, CascadeFSQuantizer
 
 
 class EncoderType(Enum):
@@ -51,3 +51,4 @@ class DiscreteQuantizer(Enum):
     LFQ = LFQuantizer
     FSQ = FSQuantizer
     RESFSQ = ResidualFSQuantizer
+    CASFSQ = CascadeFSQuantizer
