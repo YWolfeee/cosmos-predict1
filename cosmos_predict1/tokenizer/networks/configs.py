@@ -181,14 +181,13 @@ discrete_video_4x8x8_360p["temporal_compression"] = 4
 discrete_video_4x8x8_360p["spatial_compression"] = 8
 discrete_video_4x8x8_360p["patch_size"] = 2
 
-# TODO: Check, this might be redundant
-config = dict(
-    hidden_size=768, # smaller for DEBUG, 4096 for full
-    intermediate_size=768, # smaller for DEBUG, 11008 for full
-    num_encoder_layers=4, # smaller for DEBUG, 16 for full
-    num_decoder_layers=4, # smaller for DEBUG, 16 for full
-    num_attention_heads=16, # smaller for DEBUG, 32 for full
-    max_sequence_length=4096, # Not sure about this
+vit_config = dict(
+    hidden_size=1024,
+    intermediate_size=2048,
+    num_encoder_layers=10,
+    num_decoder_layers=10,
+    num_attention_heads=16,
+    max_sequence_length=4096,
     theta=10000.0,
     rms_norm_eps=1e-5,
     initializer_range=0.02
@@ -196,25 +195,24 @@ config = dict(
 
 ### TODO: filter out unnecessary parameters here
 adaptive_discrete_video = dict(
-    attn_resolutions=[32],
-    channels=128,
-    channels_mult=[2, 4, 4],
-    dropout=0.0,
     in_channels=3,
-    num_res_blocks=2,
     out_channels=3,
-    resolution=1024,
-    patch_size=8,
-    patch_method="haar",
+    patch_size=1,
+    patch_method="rearange",
     z_channels=256,
     z_factor=1,
     num_groups=1,
     spatial_compression=16,
-    temporal_compression=8,
+    temporal_compression=1,
     # Adaptive tokenization parameters
-    min_tokens=256,
-    max_tokens=2048,
-    rate_strategy="elbo",  # Options: uniform, elbo
+    min_tokens=16,
+    max_tokens=256,
+    num_patch_tokens=256,
+    num_latent_tokens=256,
+    num_video_frames=1,
+    crop_height=256,
+    rate_strategy='uniform',
+    use_latent_tokens=False,
     # Quantizer parameters
     quantizer=DiscreteQuantizer.FSQ.name,
     embedding_dim=6,
@@ -222,7 +220,7 @@ adaptive_discrete_video = dict(
     encoder=Encoder3DType.ViT.name,
     decoder=Decoder3DType.ViT.name,
     name="ADV",
-    config=config, # This is important to utilize settings from OURs
+    vit_config=vit_config, # This is important to utilize settings from OURs
 )
 
 adaptive_discrete_video_8x16x16_720p = dict(adaptive_discrete_video)

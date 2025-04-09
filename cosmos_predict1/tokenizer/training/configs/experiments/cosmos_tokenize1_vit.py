@@ -74,8 +74,7 @@ Adaptive_Tokenize1_ADV8x16x16_720p_HDVILA: LazyDict = LazyDict(
                         max_sequence_length=4096,
                         theta=10000.0,
                         rms_norm_eps=1e-5,
-                        initializer_range=0.02,
-                        use_latent=False
+                        initializer_range=0.02
                     ),
                     min_tokens=MIN_NUM_TOKENS,
                     max_tokens=MAX_NUM_TOKENS,
@@ -156,7 +155,6 @@ ADV8x16x16_256p_ImageNet_Posttrain: LazyDict = LazyDict(
                         theta=10000.0,
                         rms_norm_eps=1e-5,
                         initializer_range=0.02,
-                        use_latent=False
                     ),
                     min_tokens=min_num_tokens,
                     max_tokens=max_num_tokens,

@@ -22,10 +22,8 @@ Adapted from: https://github.com/lucidrains/magvit2-pytorch/blob/
 https://github.com/lucidrains/magvit2-pytorch/blob/
 9f49074179c912736e617d61b32be367eb5f993a/LICENSE
 """
-import math
-from typing import Tuple, Union, Optional, Dict, Any
+from typing import Tuple, Optional, Dict, Any
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -106,7 +104,7 @@ def apply_rotary_emb(q: torch.Tensor, k: torch.Tensor, freqs_cis: torch.Tensor) 
 # ------------------------------------------------------
 
 class RotaryMultiheadAttention(nn.Module):
-    def __init__(self, config: Dict):
+    def __init__(self, config: Dict, **kwargs):
         super().__init__()
         self.config = config
         embed_dim = config.hidden_size
@@ -121,6 +119,10 @@ class RotaryMultiheadAttention(nn.Module):
             persistent=False
         )
 
+        # Keep latent token away from RoPE
+        self.use_latent_tokens = kwargs.get('use_latent_tokens', False)
+        self.num_latent_tokens = kwargs.get('num_latent_tokens', 256)
+        
         # Initialize parameters as in the JAX code
         nn.init.normal_(self.mha.in_proj_weight, mean=0.0, std=config.initializer_range)
         nn.init.zeros_(self.mha.in_proj_bias)
@@ -151,6 +153,13 @@ class RotaryMultiheadAttention(nn.Module):
         q = q.view(B, S, n_heads, head_dim)
         k = k.view(B, S, n_heads, head_dim)
 
+        # Seperate latent Q, K
+        if self.use_latent_tokens:
+            latent_q = q[:, -self.num_latent_tokens:]
+            latent_k = k[:, -self.num_latent_tokens:]
+            q = q[:, :-self.num_latent_tokens]
+            k = k[:, :-self.num_latent_tokens]
+
         # If position_ids is None, assume range(S)
         if position_ids is None:
             position_ids = torch.arange(S, dtype=torch.long, device=hidden_states.device)
@@ -159,6 +168,11 @@ class RotaryMultiheadAttention(nn.Module):
         # For advanced usage, you'd gather exact freq for each position, but here we
         # assume sequences are uniform (like Llama).
         q, k = apply_rotary_emb(q, k, self.freqs_cis)
+
+        # Concatenate back latent Q, K
+        if self.use_latent_tokens:
+            q = torch.cat([q, latent_q], dim=1)
+            k = torch.cat([k, latent_k], dim=1)
 
         # Reshape back to [B, S, E]
         q = q.view(B, S, E)
@@ -210,12 +224,12 @@ class MLP(nn.Module):
 # ------------------------------------------------------------------
 
 class TransformerBlock(nn.Module):
-    def __init__(self, config: Dict):
+    def __init__(self, config: Dict, **kwargs):
         super().__init__()
         self.attention_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.ffn_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-        self.attention = RotaryMultiheadAttention(config)
+        self.attention = RotaryMultiheadAttention(config, **kwargs)
         self.mlp = MLP(config)
 
     def forward(self, hidden_states: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, 
@@ -290,7 +304,7 @@ class EncoderViT(nn.Module):
 
         # ---------- Transformer Blocks ----------
         num_layers = getattr(self.config, 'num_encoder_layers')
-        self.blocks = nn.ModuleList([TransformerBlock(self.config) for _ in range(num_layers)])
+        self.blocks = nn.ModuleList([TransformerBlock(self.config, **kwargs) for _ in range(num_layers)])
         
         # ---------- Output Projection ----------
         self.norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
@@ -302,8 +316,7 @@ class EncoderViT(nn.Module):
                 encoding_mask: torch.Tensor = None,  # [B, S] bool
                 attention_mask: torch.Tensor = None, # [B, S] float
                 position_ids: Optional[torch.Tensor] = None,
-                cache: Optional[Dict[str, torch.Tensor]] = None,
-                training: bool = True) -> Tuple[torch.Tensor, Dict[str, Any]]:
+                cache: Optional[Dict[str, torch.Tensor]] = None) -> Tuple[torch.Tensor, Dict[str, Any]]:
         # Input shape: (B, _C, _T, _H, _W), prepatchified
         # _C = 3, _T = self.num_video_frames 
         # _H = self.crop_height * h, _W = self.crop_height * w, h, w <= 1
@@ -408,7 +421,7 @@ class DecoderViT(nn.Module):
 
         # ---------- Transformer Blocks ----------
         num_layers = getattr(self.config, 'num_encoder_layers')
-        self.blocks = nn.ModuleList([TransformerBlock(self.config) for _ in range(num_layers)])
+        self.blocks = nn.ModuleList([TransformerBlock(self.config, **kwargs) for _ in range(num_layers)])
         
         # ---------- Output Projection ----------
         self.norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
@@ -418,11 +431,12 @@ class DecoderViT(nn.Module):
 
         # ---------- Unpatchify ----------
         self.patch_size = kwargs.get('patch_size', 8)
+        self.patch_method = kwargs.get('patch_method', "rearrange")
         assert self.patch_size <= spatial_compression
         assert spatial_compression % self.patch_size == 0, f"spatial_compression ({spatial_compression}) must be divisible by patch_size ({self.patch_size}) for proper unpatchification"
         assert self.patch_size == temporal_compression, f"patch_size ({self.patch_size}) must equal temporal_compression ({temporal_compression}) for proper unpatchification"
         # Currently UnPatcher3D does not support tuple patch_size
-        self.unpatcher = UnPatcher3D(patch_size=self.patch_size) 
+        self.unpatcher = UnPatcher3D(patch_size=self.patch_size, patch_method=self.patch_method) 
         # We need to further rearange the tokens to satisfy compression rate
         self.extra_spatial_compression = spatial_compression // self.patch_size
         self.extra_temporal_compression = temporal_compression // self.patch_size
@@ -433,8 +447,7 @@ class DecoderViT(nn.Module):
             encoding_mask: Optional[torch.Tensor] = None,
             attention_mask: Optional[torch.Tensor] = None,
             position_ids: Optional[torch.Tensor] = None,
-            cache: Optional[Dict[str, torch.Tensor]] = None,
-            training: bool = True) -> Tuple[torch.Tensor, Dict[str, Any]]:
+            cache: Optional[Dict[str, torch.Tensor]] = None) -> Tuple[torch.Tensor, Dict[str, Any]]:
         # Input shape: (B, z_channels, T, H, W)
         B, C, T, H, W = x.shape
         if self.use_latent_tokens:
