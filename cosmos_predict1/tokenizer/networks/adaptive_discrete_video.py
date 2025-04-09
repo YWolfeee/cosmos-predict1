@@ -35,8 +35,7 @@ class AdaptiveTokenizationModule(nn.Module):
     """
     
     def __init__(self, 
-                 min_tokens: int = 256, 
-                 max_tokens: int = 2048,
+                 min_tokens_ratio: float = 1/16,
                  rate_strategy: str = 'uniform',
                  **kwargs) -> None:
         """Initialize the adaptive tokenization module.
@@ -49,8 +48,12 @@ class AdaptiveTokenizationModule(nn.Module):
             **kwargs: Additional kwargs.
         """
         super().__init__()
-        self.min_tokens = min_tokens
-        self.max_tokens = max_tokens
+        # TODO: check the modification
+        self.use_latent_tokens = kwargs.get("use_latent_tokens", False)
+        self.num_latent_tokens = kwargs.get("num_latent_tokens", 0)
+        self.num_patch_tokens = kwargs.get("num_patch_tokens", 0)
+        self.max_tokens = self.num_latent_tokens if self.use_latent_tokens else self.num_patch_tokens
+        self.min_tokens = min_tokens_ratio * self.max_tokens
         self.rate_strategy = rate_strategy
         
     def compute_token_allocation(self, 
@@ -123,7 +126,7 @@ class AdaptiveTokenizationModule(nn.Module):
         for b in range(batch_size):
             block_masks = []
             for t in range(num_blocks):
-                num_tokens = min(tokens_per_block[b, t].item(), max_spatial_tokens)
+                num_tokens = int(min(tokens_per_block[b, t].item(), max_spatial_tokens))
                 block_mask = torch.zeros(max_spatial_tokens, device=tokens_per_block.device)
                 block_mask[:num_tokens] = 1.0
                 block_masks.append(block_mask)
@@ -159,8 +162,7 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
         self.embedding_dim = embedding_dim
         
         # Tokenization parameters
-        self.min_tokens = kwargs.get("min_tokens", 256)
-        self.max_tokens = kwargs.get("max_tokens", 2048)
+        self.min_tokens_ratio = kwargs.get("min_tokens_ratio", 1/16)
         self.rate_strategy = kwargs.get("rate_strategy", "uniform")
         
         # Initialize 3D encoder (similar to CausalDiscreteVideoTokenizer)
@@ -255,7 +257,9 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
             quant_codes: Quantized codes
             quant_loss: Quantization loss
         """
-        # TODO: Add attention mask which is both causal and adaptive
+        # TODO: Use self.adaptive_tokenization.compute_token_allocation() to get the mask
+        #       And process to generate encoding mask (for patch) and attention mask (for latent)
+        
         # Encode input to latent representation
         h = self.encoder(x, encoding_mask=None, attention_mask=None)
         h = self.quant_conv(h) # h: (B, embedding_dim, T, H, W)
@@ -264,17 +268,22 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
         B, C, T, H, W = h.shape
         
         # Reshape to 1D sequence
-        h_1d = self.reshape_3d_to_1d(h)
+        h_1d = self.reshape_3d_to_1d(h) # [B, C, T*H*W]
         
         # Compute adaptive token allocation if rate_scores provided
         mask = None
+        
+        # TODO: this is a placeholder for rate_scores, require to remove later
+        if rate_scores is None and self.rate_strategy == "uniform":
+            rate_scores = torch.rand(B, T, dtype=h.dtype, device=h.device) # [B, T]
+
+        # TODO: The mask should be moved to the start of encode()
         if rate_scores is not None:
-            _, mask = self.adaptive_tokenization.compute_token_allocation(rate_scores)
+            _, mask = self.adaptive_tokenization.compute_token_allocation(rate_scores) # mask: [B, T, H*W]
             mask_1d = mask.reshape(B, -1)  # Reshape to [B, T*H*W]
-            
             # Apply mask to 1D sequence
             h_1d = self.apply_mask(h_1d, mask_1d)
-        
+
         # Reshape back to 3D for decoder
         h = self.reshape_1d_to_3d(h_1d, T, H, W)
         

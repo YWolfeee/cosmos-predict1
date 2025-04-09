@@ -36,8 +36,7 @@ AdaptiveDiscreteVideoTokenizerConfig: LazyDict = L(AdaptiveDiscreteVideoTokenize
     spatial_compression=16,
     temporal_compression=8,
     # Adaptive tokenization parameters
-    min_tokens=256,
-    max_tokens=2048,
+    min_tokens_ratio=1/16,
     rate_strategy="elbo",  # Options: uniform, elbo
     # Quantizer parameters 
     quantizer=DiscreteQuantizer.FSQ.name,

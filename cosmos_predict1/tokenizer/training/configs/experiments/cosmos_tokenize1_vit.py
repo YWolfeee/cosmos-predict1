@@ -27,8 +27,11 @@ NUM_VIDEO_FRAMES = 121 # this should be temporal_compression_rate * n + 1 (n=1,2
 CROP_HEIGHT = 256 # This indicates the largest width / height of the video
 TEMPORAL_COMPRESSION = 8
 SPATIAL_COMPRESSION = 16
-MAX_NUM_TOKENS = (NUM_VIDEO_FRAMES - 1) // TEMPORAL_COMPRESSION * (CROP_HEIGHT // SPATIAL_COMPRESSION) ** 2 # 15 (if 121) * 16 * 16 = 3840, if 129, 16 * 16 * 16 = 4096
-MIN_NUM_TOKENS = MAX_NUM_TOKENS // 16 # if MAX_NUM_TOKENS = 4096, MIN_NUM_TOKENS = 256
+num_temporal_patches = (NUM_VIDEO_FRAMES + TEMPORAL_COMPRESSION - 1) // TEMPORAL_COMPRESSION
+num_spatial_patches = CROP_HEIGHT // SPATIAL_COMPRESSION
+num_patch_tokens = num_temporal_patches * num_spatial_patches ** 2
+num_latent_tokens = num_patch_tokens
+MIN_TOKENS_RATIO = 1/16
 
 # ------------ ViT backbone config ------------
 
@@ -76,9 +79,13 @@ Adaptive_Tokenize1_ADV8x16x16_720p_HDVILA: LazyDict = LazyDict(
                         rms_norm_eps=1e-5,
                         initializer_range=0.02,
                     ),
-                    min_tokens=MIN_NUM_TOKENS,
-                    max_tokens=MAX_NUM_TOKENS,
-                    rate_strategy='uniform'
+                    min_tokens_ratio=MIN_TOKENS_RATIO,
+                    num_patch_tokens=num_patch_tokens,
+                    num_latent_tokens=num_latent_tokens,
+                    rate_strategy='uniform',
+                    use_latent_tokens=False,
+                    quantizer="CASFSQ",
+                    num_quantizers=4,
                 )
             )
         ),
@@ -104,12 +111,11 @@ CROP_HEIGHT = 256 # This indicates the largest width / height of the video
 BATCH_SIZE = 32
 TEMPORAL_COMPRESSION = 1
 SPATIAL_COMPRESSION = 16
-num_temporal_patches = (NUM_VIDEO_FRAMES - 1 if NUM_VIDEO_FRAMES > 1 else 1) // TEMPORAL_COMPRESSION
+num_temporal_patches = (NUM_VIDEO_FRAMES + TEMPORAL_COMPRESSION - 1) // TEMPORAL_COMPRESSION
 num_spatial_patches = CROP_HEIGHT // SPATIAL_COMPRESSION
 num_patch_tokens = num_temporal_patches * num_spatial_patches ** 2
 num_latent_tokens = num_patch_tokens
-max_num_tokens = num_latent_tokens
-min_num_tokens = num_latent_tokens // 16
+MIN_TOKENS_RATIO = 1 / 16
 
 # ------------ ViT backbone config ------------
 
@@ -156,8 +162,7 @@ ADV8x16x16_256p_ImageNet_Posttrain: LazyDict = LazyDict(
                         rms_norm_eps=1e-5,
                         initializer_range=0.02,
                     ),
-                    min_tokens=min_num_tokens,
-                    max_tokens=max_num_tokens,
+                    min_tokens_ratio=MIN_TOKENS_RATIO,
                     num_patch_tokens=num_patch_tokens,
                     num_latent_tokens=num_latent_tokens,
                     rate_strategy='uniform',

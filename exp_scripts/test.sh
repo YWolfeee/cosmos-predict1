@@ -27,7 +27,7 @@ export OUTPUT_ROOT=checkpoints
 export CUDA_HOME=$CONDA_PREFIX
 export TORCH_HOME=/home/qiyuan/.cache/torch/hub
 
-torchrun --nproc_per_node=2 --rdzv_endpoint=localhost:${host_id} \
+WANDB_MODE=offline torchrun --nproc_per_node=2 --rdzv_endpoint=localhost:${host_id} \
     -m cosmos_predict1.tokenizer.training.train \
     --config=cosmos_predict1/tokenizer/training/configs/config.py -- \
     experiment=ADV8x16x16_256p_ImageNet_Posttrain \

@@ -205,8 +205,7 @@ adaptive_discrete_video = dict(
     spatial_compression=16,
     temporal_compression=1,
     # Adaptive tokenization parameters
-    min_tokens=16,
-    max_tokens=256,
+    min_tokens_ratio=1/16,
     num_patch_tokens=256,
     num_latent_tokens=256,
     num_video_frames=1,

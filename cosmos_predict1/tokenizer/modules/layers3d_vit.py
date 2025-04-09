@@ -291,6 +291,7 @@ class EncoderViT(nn.Module):
         if self.use_latent_tokens:
             self.num_patch_tokens = kwargs.get('num_patch_tokens')
             self.num_latent_tokens = kwargs.get('num_latent_tokens')
+            assert self.num_latent_tokens % (self.num_video_frames // self.extra_temporal_compression) == 0, "num_latent_tokens must be divisible by the number of blocks"
             scale = self.config.hidden_size ** -0.5
             self.latent_tokens = nn.Parameter(scale * torch.randn(self.num_latent_tokens, self.config.hidden_size))
             # Additional Positional Embedding to distinguish latent tokens from patch_tokens
@@ -318,8 +319,8 @@ class EncoderViT(nn.Module):
                 position_ids: Optional[torch.Tensor] = None,
                 cache: Optional[Dict[str, torch.Tensor]] = None) -> Tuple[torch.Tensor, Dict[str, Any]]:
         # Input shape: (B, _C, _T, _H, _W), prepatchified
-        # _C = 3, _T = self.num_video_frames 
-        # _H = self.crop_height * h, _W = self.crop_height * w, h, w <= 1
+        #   _C = 3, _T = self.num_video_frames 
+        #   _H = self.crop_height * h, _W = self.crop_height * w, h, w <= 1
         B = x.shape[0]
 
         # ---------- 1.Patchify to 1D ---------- 
@@ -334,7 +335,7 @@ class EncoderViT(nn.Module):
                 p3=self.extra_spatial_compression,
             ).contiguous() 
         # x: (B, _C * (sc ** 2) * tc, _T / tc, _H / sc, _W / sc), postpatchified
-        # sc: spatial_compression; tc: temporal_compression
+        #   sc: spatial_compression; tc: temporal_compression
         B, C, T, H, W = x.shape
         ### Flatten the spatial and temporal dimensions
         x = x.reshape(B, C, -1) # (B, C, T * H * W)
@@ -376,7 +377,8 @@ class EncoderViT(nn.Module):
         ### To match original codebase format
         x = x.permute(0, 2, 1)  # (B, z_channels, T * H * W)
         if self.use_latent_tokens:
-            x = x.reshape(B, x.shape[1], x.shape[2], 1, 1)
+            # TODO: Check: here we need to keep the block information, which is T
+            x = x.reshape(B, x.shape[1], T, -1, 1)
         else:
             x = x.reshape(B, -1, T, H, W)  # (B, z_channels, T, H, W)
         
@@ -463,14 +465,15 @@ class DecoderViT(nn.Module):
         # ---------- 2. Input Projection ----------
         x = self.input_proj(x)  # (B, T*H*W, hidden_size)
 
+        # ---------- 3. Add Positional Embedding ----------
         if self.use_latent_tokens:
             x = x + self.latent_tokens_pos_emb.unsqueeze(0)  # (B, N2, D)
             masked_x = self.mask_token + self.patch_tokens_pos_emb  # (N1, D)
             masked_x = masked_x.unsqueeze(0).repeat(B, 1, 1)  # (B, N1, D)
             x = torch.cat([masked_x, x], dim=1)  # (B, N1+N2, D)
-        
-        # ---------- 3. Add Positional Embedding ----------
-        if encoding_mask is not None:
+        elif encoding_mask is not None: # only take effect under elastictok settings without latent tokens
+            # TODO: Decide whether we keep this embed or not
+            #   In the original ElasticTok, this embed is not considered in the decoder, but only mask to 0
             keep_embed = self.is_kept_embed.unsqueeze(1)  # (1, 1, hidden_size)
             mask_embed = self.is_masked_embed.unsqueeze(1)  # (1, 1, hidden_size)
             x = x + torch.where(encoding_mask.unsqueeze(-1), keep_embed, mask_embed)
