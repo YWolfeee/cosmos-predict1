@@ -367,7 +367,7 @@ class EncoderViT(nn.Module):
         else:
             x = x.reshape(B, -1, T, H, W)  # (B, z_channels, T, H, W)
         
-        return x, (T, H, W)
+        return x
 
 class DecoderViT(nn.Module):
     """Vision Transformer Decoder for 3D Video"""
@@ -430,14 +430,18 @@ class DecoderViT(nn.Module):
     def forward(
             self, 
             x: torch.Tensor,
-            patch_shape: Tuple[int, int, int] = None,
             encoding_mask: Optional[torch.Tensor] = None,
             attention_mask: Optional[torch.Tensor] = None,
             position_ids: Optional[torch.Tensor] = None,
             cache: Optional[Dict[str, torch.Tensor]] = None,
             training: bool = True) -> Tuple[torch.Tensor, Dict[str, Any]]:
         # Input shape: (B, z_channels, T, H, W)
-        B, C, _, _, _ = x.shape
+        B, C, T, H, W = x.shape
+        if self.use_latent_tokens:
+            # overwrite T, H, W when using 1D
+            T = self.num_video_frames // self.extra_temporal_compression
+            H = self.crop_height // self.extra_spatial_compression
+            W = self.crop_height // self.extra_spatial_compression
         
         # ---------- 1. Reshape to 1D ----------
         x = x.reshape(B, C, -1)  # (B, z_channels, T*H*W)
@@ -476,7 +480,7 @@ class DecoderViT(nn.Module):
         
         # ---------- 6. Unpatchify to 3D ----------
         x = x.permute(0, 2, 1)  # (B, out_channels*patch_size^3, T*H*W)
-        x = x.reshape(B, -1, *patch_shape)  # (B, out_channels*patch_size^3, T, H, W)
+        x = x.reshape(B, -1, T, H, W)  # (B, out_channels*patch_size^3, T, H, W)
         if self.extra_spatial_compression > 1 or self.extra_temporal_compression > 1:
             x = rearrange(
                 x,
