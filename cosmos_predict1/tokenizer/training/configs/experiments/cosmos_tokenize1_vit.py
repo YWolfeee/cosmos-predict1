@@ -104,13 +104,9 @@ NUM_VIDEO_FRAMES = 1 # Image as 1-Frame Video Training
 CROP_HEIGHT = 256 # This indicates the largest width / height of the video
 BATCH_SIZE = 32
 TEMPORAL_COMPRESSION = 1
+TEMPORAL_COMPRESSION_SEQUENCE = [1, 1, 1]
 SPATIAL_COMPRESSION = 16
-num_temporal_patches = (NUM_VIDEO_FRAMES - 1 if NUM_VIDEO_FRAMES > 1 else 1) // TEMPORAL_COMPRESSION
-num_spatial_patches = CROP_HEIGHT // SPATIAL_COMPRESSION
-num_patch_tokens = num_temporal_patches * num_spatial_patches ** 2
-num_latent_tokens = num_patch_tokens
-max_num_tokens = num_latent_tokens
-min_num_tokens = num_latent_tokens // 16
+SPATIAL_COMPRESSION_SEQUENCE = [4, 2, 2]
 
 # ------------ ViT backbone config ------------
 
@@ -140,10 +136,12 @@ ADV8x16x16_256p_ImageNet_Posttrain: LazyDict = LazyDict(
         model=dict(
             config=dict(
                 network=dict(
-                    patch_size=TEMPORAL_COMPRESSION,
                     legacy_mode=False,
-                    temporal_compression=TEMPORAL_COMPRESSION, # This should be exactly the same as patch_size to ensure the code is excutable
+                    patch_method="rearrange",
                     spatial_compression=SPATIAL_COMPRESSION, # This should be patch_size*n (n=1,2,...)
+                    spatial_compression_sequence=SPATIAL_COMPRESSION_SEQUENCE,
+                    temporal_compression=TEMPORAL_COMPRESSION, # This should be exactly the same as patch_size to ensure the code is excutable
+                    temporal_compression_sequence=TEMPORAL_COMPRESSION_SEQUENCE,
                     num_video_frames=NUM_VIDEO_FRAMES,
                     crop_height=CROP_HEIGHT,
                     vit_config=dict(
@@ -156,13 +154,11 @@ ADV8x16x16_256p_ImageNet_Posttrain: LazyDict = LazyDict(
                         theta=10000.0,
                         rms_norm_eps=1e-5,
                         initializer_range=0.02,
-                        use_latent=False
+                        use_3d_rotary=False,
                     ),
-                    min_tokens=min_num_tokens,
-                    max_tokens=max_num_tokens,
-                    num_patch_tokens=num_patch_tokens,
-                    num_latent_tokens=num_latent_tokens,
-                    rate_strategy='uniform'
+                    min_tokens=16,
+                    max_tokens=1024,
+                    rate_strategy='uniform',
                 )
             )
         ),

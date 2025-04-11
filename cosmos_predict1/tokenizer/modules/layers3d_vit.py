@@ -31,7 +31,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-from cosmos_predict1.tokenizer.modules.patching import Patcher3D, UnPatcher3D
+from cosmos_predict1.tokenizer.modules.patching import Patcher3DArbitrary, UnPatcher3DArbitrary
 
 
 ########################################################
@@ -69,6 +69,71 @@ def precompute_freqs_cis(dim: int, max_position_embeddings: int, theta: float = 
     sin, cos = freqs.sin(), freqs.cos()
     # Combine cos/sin into last dimension
     return torch.stack([cos, sin], dim=-1)  # [max_pos, dim/2, 2]
+
+
+def precompute_freqs_cis_2d(dim: int, height: int, width: int, theta: float) -> torch.Tensor:
+    """
+    Copied from https://github.com/mistralai/mistral-inference/blob/main/src/mistral_inference/rope.py
+
+    freqs_cis: 2D complex tensor of shape (height, width, dim // 2) to be indexed by
+        (height, width) position tuples
+    """
+    # (dim / 2) frequency bases
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
+
+    h = torch.arange(height, device=freqs.device)
+    w = torch.arange(width, device=freqs.device)
+
+    freqs_h = torch.outer(h, freqs[::2]).float()
+    freqs_w = torch.outer(w, freqs[1::2]).float()
+    freqs_2d = torch.cat(
+        [
+            freqs_h[:, None, :].repeat(1, width, 1),
+            freqs_w[None, :, :].repeat(height, 1, 1),
+        ],
+        dim=-1,
+    )
+
+    freqs_2d = torch.polar(torch.ones_like(freqs_2d), freqs_2d) # (height, width, dim // 2)
+    sin, cos = freqs_2d.real, freqs_2d.imag   
+    # Combine cos/sin into last dimension
+    return torch.stack([cos, sin], dim=-1)  # [height, width, dim //2, 2]
+
+
+def apply_rotary_emb_2d(q: torch.Tensor, k: torch.Tensor, freqs_cis: torch.Tensor,) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Copied from https://github.com/mistralai/mistral-inference/blob/main/src/mistral_inference/rope.py
+
+    q, k: [B, h, w, n_heads, head_dim], head_dim must be even
+    freqs_cis: [max_seq_len, head_dim/2, 2]
+    """
+    bsz, h, w, n_heads, head_dim = q.shape
+    # slice out the needed positions
+    freqs_cis = freqs_cis[:h, :w]  # shape [h, w, head_dim//2, 2]
+
+    # Expand to shape [1, h, w, 1, head_dim//2, 2]
+    freqs_cis = freqs_cis.unsqueeze(2).unsqueeze(0)
+
+    # reshape Q/K to complex
+    q_reshaped = q.view(bsz, h, w, n_heads, head_dim // 2, 2)
+    k_reshaped = k.view(bsz, h, w, n_heads, head_dim // 2, 2)
+
+    # This convert is to ensure view_as_complex is supported
+    q_complex = torch.view_as_complex(q_reshaped.to(torch.float32))
+    k_complex = torch.view_as_complex(k_reshaped.to(torch.float32))
+
+    # Properly expand freqs_cis to match the batch and head dimensions
+    # [1, h, w, 1, head_dim//2, 2] -> [bsz, h, w, n_heads, head_dim//2, 2]
+    freqs_cis = freqs_cis.expand(bsz, h, w, n_heads, head_dim // 2, 2)
+    freqs_complex = torch.view_as_complex(freqs_cis.to(torch.float32))
+
+    q_out = torch.view_as_real(q_complex * freqs_complex).to(q.dtype)
+    k_out = torch.view_as_real(k_complex * freqs_complex).to(k.dtype)
+
+    q_out = q_out.view(bsz, h, w, n_heads, head_dim)
+    k_out = k_out.view(bsz, h, w, n_heads, head_dim)
+    return q_out, k_out
+
 
 def apply_rotary_emb(q: torch.Tensor, k: torch.Tensor, freqs_cis: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """
@@ -114,12 +179,21 @@ class RotaryMultiheadAttention(nn.Module):
         self.head_dim = embed_dim // num_heads
 
         self.mha = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
-        # Build a buffer for rotary
-        self.register_buffer(
-            'freqs_cis',
-            precompute_freqs_cis(self.head_dim, config.max_sequence_length, config.theta),
-            persistent=False
-        )
+
+        if not config.use_3d_rotary:
+            # Build a buffer for rotary
+            self.register_buffer(
+                'freqs_cis',
+                precompute_freqs_cis(self.head_dim, config.max_sequence_length, config.theta),
+                persistent=False
+            )
+        else:
+            # Build a buffer for 2D rotary
+            self.register_buffer(
+                'freqs_cis_2d',
+                precompute_freqs_cis_2d(self.head_dim, config.max_sequence_length, config.max_sequence_length, config.theta),
+                persistent=False
+            )
 
         # Initialize parameters as in the JAX code
         nn.init.normal_(self.mha.in_proj_weight, mean=0.0, std=config.initializer_range)
@@ -148,17 +222,28 @@ class RotaryMultiheadAttention(nn.Module):
         # Now reshape Q/K for rotary
         n_heads = self.mha.num_heads
         head_dim = E // n_heads
-        q = q.view(B, S, n_heads, head_dim)
-        k = k.view(B, S, n_heads, head_dim)
 
-        # If position_ids is None, assume range(S)
-        if position_ids is None:
-            position_ids = torch.arange(S, dtype=torch.long, device=hidden_states.device)
-            position_ids = position_ids.unsqueeze(0).expand(B, S)
+        if self.config.use_3d_rotary:
+            # apply 3D rotary embedding
+            T, H, W = position_ids
+            q = q.view(B, T, H, W, n_heads, head_dim)
+            k = k.view(B, T, H, W, n_heads, head_dim)
 
-        # For advanced usage, you'd gather exact freq for each position, but here we
-        # assume sequences are uniform (like Llama).
-        q, k = apply_rotary_emb(q, k, self.freqs_cis)
+            # merge T to batch dimension to apply rotary embedding
+            q = rearrange(q, "b t h w n d -> (b t) h w n d")
+            k = rearrange(k, "b t h w n d -> (b t) h w n d")
+            # apply rotary embedding
+            q, k = apply_rotary_emb_2d(q, k, self.freqs_cis_2d)
+            # reshape back to [B, T, H, W, n_heads, head_dim]
+            q = rearrange(q, "(b t) h w n d -> b t h w n d", b=B, t=T)
+            k = rearrange(k, "(b t) h w n d -> b t h w n d", b=B, t=T)
+
+        else:
+            q = q.view(B, S, n_heads, head_dim)
+            k = k.view(B, S, n_heads, head_dim)
+            # For advanced usage, you'd gather exact freq for each position, but here we
+            # assume sequences are uniform (like Llama).
+            q, k = apply_rotary_emb(q, k, self.freqs_cis)
 
         # Reshape back to [B, S, E]
         q = q.view(B, S, E)
@@ -241,8 +326,8 @@ class EncoderViT(nn.Module):
         self, 
         in_channels: int = 3, 
         z_channels: int = 512,
-        spatial_compression: int = 8, 
-        temporal_compression: int = 16, 
+        spatial_compression: int = 8,
+        temporal_compression: int = 16,
         **kwargs
     ):
         super().__init__()
@@ -253,39 +338,74 @@ class EncoderViT(nn.Module):
         self.config = kwargs.get('vit_config')
 
         # ---------- Patchify ----------
-        self.patch_size = kwargs.get('patch_size', 8)
+        # self.patch_size = kwargs.get('patch_size', 8)
         self.patch_method = kwargs.get('patch_method', "rearrange")
-        assert self.patch_size <= spatial_compression
-        assert spatial_compression % self.patch_size == 0, f"spatial_compression ({spatial_compression}) must be divisible by patch_size ({self.patch_size}) for proper unpatchification"
-        assert self.patch_size == temporal_compression, f"patch_size ({self.patch_size}) must equal temporal_compression ({temporal_compression}) for proper unpatchification"
-        # Currently Patcher3D does not support tuple patch_size
-        self.patcher = Patcher3D(patch_size=self.patch_size, patch_method=self.patch_method) 
-        # We need to further rearange the tokens to satisfy compression rate
-        self.extra_spatial_compression = spatial_compression // self.patch_size
-        self.extra_temporal_compression = temporal_compression // self.patch_size
-        
-        # ---------- Positional Embedding ----------
-        self.crop_height = kwargs.get('crop_height', 256)
-        self.num_video_frames = kwargs.get('num_video_frames', 121)
-        self.is_kept_embed = nn.Parameter(torch.empty(1, self.config.hidden_size))
-        self.is_masked_embed = nn.Parameter(torch.empty(1, self.config.hidden_size))
-        nn.init.kaiming_normal_(self.is_kept_embed)
-        nn.init.kaiming_normal_(self.is_masked_embed)
+        self.spatial_compression_sequence = kwargs.get(
+            'spatial_compression_sequence',
+            [spatial_compression]
+        )
+        self.spatial_compression = spatial_compression
+        self.temporal_compression_sequence = kwargs.get(
+            'temporal_compression_sequence',
+            [temporal_compression]
+        )
+        self.temporal_compression = temporal_compression
+
+        # assert the product of spatial_compression_sequence equals spatial_compression
+        assert self.spatial_compression == np.prod(self.spatial_compression_sequence)
+        assert self.temporal_compression == np.prod(self.temporal_compression_sequence)
+        assert len(self.spatial_compression_sequence) == len(self.temporal_compression_sequence)
+        self.num_hierarchy = len(self.spatial_compression_sequence)
+
+        self.patchers = nn.ModuleList(
+            [Patcher3DArbitrary(
+                spatial_patch_size=self.spatial_compression_sequence[i],
+                temporal_patch_size=self.temporal_compression_sequence[i],
+                patch_method=self.patch_method,
+            ) for i in range(self.num_hierarchy)]
+        )
 
         # TODO: Add 1D latent tokens & Learnable Positional Embedding
         # ---------- 1D Latent Tokens & Its Positional Embedding ----------
+        
+        # ---------- Temporal Embedding ----------
+        self.max_num_video_frames = kwargs.get('max_num_video_frames', 121)
+        self.temporal_embed = nn.Parameter(torch.empty(self.max_num_video_frames, self.config.hidden_size))
+        nn.init.kaiming_normal_(self.temporal_embed)
 
         # ---------- Input Projection ----------
-        patch_dim = in_channels * temporal_compression * (spatial_compression ** 2)
-        self.input_proj = nn.Linear(patch_dim, self.config.hidden_size, bias=False)
-        nn.init.normal_(self.input_proj.weight, mean=0.0, std=self.config.initializer_range)
+        input_channels = [in_channels] + [self.config.hidden_size] * (self.num_hierarchy - 1)
+        patch_dims = [
+            input_channels[i] * self.temporal_compression_sequence[i] * (self.spatial_compression_sequence[i] ** 2)
+            for i in range(self.num_hierarchy)
+        ]
+        self.patch_norms = nn.ModuleList(
+            [RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
+            for i in range(self.num_hierarchy)]
+        )
+        self.patch_projs = nn.ModuleList(
+            [nn.Linear(patch_dims[i], self.config.hidden_size, bias=False)
+            for i in range(self.num_hierarchy)]
+        )
+        for i in range(self.num_hierarchy):
+            nn.init.normal_(self.patch_projs[i].weight, mean=0.0, std=self.config.initializer_range)
 
         # ---------- Transformer Blocks ----------
         num_layers = getattr(self.config, 'num_encoder_layers')
-        self.blocks = nn.ModuleList([TransformerBlock(self.config) for _ in range(num_layers)])
+        num_layers_per_hierarchy = num_layers // self.num_hierarchy
+        all_num_layers = [
+            num_layers_per_hierarchy if i < self.num_hierarchy - 1 else num_layers - (num_layers_per_hierarchy * (self.num_hierarchy - 1))
+            for i in range(self.num_hierarchy)
+        ]
+        self.all_blocks = nn.ModuleList([
+            nn.ModuleList([TransformerBlock(self.config) for _ in range(all_num_layers[i])])
+            for i in range(self.num_hierarchy)
+        ])
+
+        # self.blocks = nn.ModuleList([TransformerBlock(self.config) for _ in range(num_layers)])
         
         # ---------- Output Projection ----------
-        self.norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
+        # self.norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
         self.output_proj = nn.Linear(self.config.hidden_size, z_channels, bias=False)
         nn.init.normal_(self.output_proj.weight, mean=0.0, std=self.config.initializer_range)
 
@@ -296,53 +416,42 @@ class EncoderViT(nn.Module):
                 position_ids: Optional[torch.Tensor] = None,
                 cache: Optional[Dict[str, torch.Tensor]] = None,
                 training: bool = True) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        # Input shape: (B, _C, _T, _H, _W), prepatchified
-        # _C = 3, _T = self.num_video_frames 
-        # _H = self.crop_height * h, _W = self.crop_height * w, h, w <= 1
-        B = x.shape[0]
+        # x: (B, C, T, H, W)
 
-        # ---------- 1.Patchify to 1D ---------- 
-        x = self.patcher(x)  # (B, _C * patch_size**3, _T / patch_size, _H / patch_size, _W / patch_size)
-        ### Further rearange the token to satisfy compression rate
-        if self.extra_spatial_compression > 1 or self.extra_temporal_compression > 1:
-            x = rearrange(
-                x,
-                "b c (t p1) (h p2) (w p3) -> b (c p1 p2 p3) t h w",
-                p1=self.extra_temporal_compression,
-                p2=self.extra_spatial_compression,
-                p3=self.extra_spatial_compression,
-            ).contiguous() 
-        # x: (B, _C * (sc ** 2) * tc, _T / tc, _H / sc, _W / sc), postpatchified
-        # sc: spatial_compression; tc: temporal_compression
-        B, C, T, H, W = x.shape
-        ### Flatten the spatial and temporal dimensions
-        x = x.reshape(B, C, -1) # (B, C, T * H * W)
-        x = x.permute(0, 2, 1) # (B, T * H * W, C)
-        
-        # ---------- 2. Input Projection ----------
-        x = self.input_proj(x) # (B, T * H * W, D), D = self.config.hidden_size
+        for i in range(self.num_hierarchy):
+            # ---------- 1.Patchify ----------
+            x = self.patchers[i](x)  # (B, C', T', H', W')
+            B, C, T, H, W = x.shape
+            x = x.reshape(B, C, -1)  # (B, C', T'*H'*W')
+            x = x.permute(0, 2, 1)  # (B, T'*H'*W', C)
+            # ---------- 2. Input Projection ----------
+            x = self.patch_projs[i](x)  # (B, T'*H'*W', D)
 
-        # TODO: Add forward with 1D latent tokens & its positional embedding
-        
-        # ---------- 3. Add Positional Embedding ----------
-        if encoding_mask is not None:
-            keep_embed = self.is_kept_embed.unsqueeze(1)  # (1, 1, hidden_size)
-            mask_embed = self.is_masked_embed.unsqueeze(1)  # (1, 1, hidden_size)
-            x = x + torch.where(encoding_mask.unsqueeze(-1), keep_embed, mask_embed)
-        
-        # ---------- 4. Transformer Forward ----------
-        for blk in self.blocks:
-            x = blk(
-                x,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                cache=cache
-            )  # Maintains shape # (B, T * H * W, D)
+            # apply learnable 
+            x = x.reshape(B, T, H * W, -1) + self.temporal_embed[None, :T, None]
+            x = x.reshape(B, T * H * W, -1)
+
+            # ---------- 3. Add Positional Embedding ----------
+            # ---------- 4. Transformer Forward ----------
+            for blk in self.all_blocks[i]:
+                x = blk(
+                    x,
+                    attention_mask=attention_mask,
+                    position_ids=(T, H, W),
+                    cache=cache
+                )
+            
+            x = self.patch_norms[i](x)  # (B, T'*H'*W', D)
+            x = x.permute(0, 2, 1)  # (B, D, T'*H'*W')
+            x = x.reshape(B, -1, T, H, W)  # (B, D, T', H', W')
 
         # TODO: Extract latent tokens
         
         # ---------- 5. Output Projection ----------
-        x = self.norm(x)  # (B, T * H * W, D)
+        # x = self.norm(x)  # (B, T * H * W, D)
+        B, C, T, H, W = x.shape
+        x = x.reshape(B, C, -1)  # (B, C, T*H*W)
+        x = x.permute(0, 2, 1)  # (B, T*H*W, C)
         x = self.output_proj(x)  # (B, T * H * W, z_channels)
         
         # ---------- 6. Reshape to 3D ----------
@@ -350,6 +459,7 @@ class EncoderViT(nn.Module):
         x = x.permute(0, 2, 1)  # (B, z_channels, T * H * W)
         x = x.reshape(B, -1, T, H, W)  # (B, z_channels, T, H, W)
         return x
+
 
 class DecoderViT(nn.Module):
     """Vision Transformer Decoder for 3D Video"""
@@ -365,40 +475,78 @@ class DecoderViT(nn.Module):
         # ---------- Config for ElasticTok ----------
         self.config = kwargs.get('vit_config')
 
+        # ---------- Unpatchify ----------
+        # self.patch_size = kwargs.get('patch_size', 8)
+        self.patch_method = kwargs.get('patch_method', "rearrange")
+        self.spatial_compression_sequence = kwargs.get(
+            'spatial_compression_sequence',
+            [spatial_compression]
+        )
+        # reverse the compression rate to get the decompression rate for decoder
+        self.spatial_compression_sequence.reverse()
+        self.spatial_compression = spatial_compression
+        self.temporal_compression_sequence = kwargs.get(
+            'temporal_compression_sequence',
+            [temporal_compression]
+        )
+        self.temporal_compression_sequence.reverse()
+        self.temporal_compression = temporal_compression
+        # assert the product of spatial_compression_sequence equals spatial_compression
+        assert self.spatial_compression == np.prod(self.spatial_compression_sequence)
+        assert self.temporal_compression == np.prod(self.temporal_compression_sequence)
+        assert len(self.spatial_compression_sequence) == len(self.temporal_compression_sequence)
+        self.num_hierarchy = len(self.spatial_compression_sequence)
+
+        self.unpatchers = nn.ModuleList(
+            [UnPatcher3DArbitrary(
+                spatial_patch_size=self.spatial_compression_sequence[i],
+                temporal_patch_size=self.temporal_compression_sequence[i],
+                patch_method=self.patch_method,
+            ) for i in range(self.num_hierarchy)]
+        )
+
         # ---------- Input Projection ----------
         self.input_proj = nn.Linear(z_channels, self.config.hidden_size, bias=False)
         nn.init.normal_(self.input_proj.weight, mean=0.0, std=self.config.initializer_range)
 
-        # ---------- Positional Embedding ----------
-        self.crop_height = kwargs.get('crop_height', 256)
-        self.num_video_frames = kwargs.get('num_video_frames', 121)
-        self.is_kept_embed = nn.Parameter(torch.empty(1, self.config.hidden_size))
-        self.is_masked_embed = nn.Parameter(torch.empty(1, self.config.hidden_size))
-        nn.init.kaiming_normal_(self.is_kept_embed)
-        nn.init.kaiming_normal_(self.is_masked_embed)
+        # ---------- Temporal Embedding ----------
+        self.max_num_video_frames = kwargs.get('max_num_video_frames', 121)
+        self.temporal_embed = nn.Parameter(torch.empty(self.max_num_video_frames, self.config.hidden_size))
+        nn.init.kaiming_normal_(self.temporal_embed)
 
         # TODO: Add masked tokens & Learnable Positional Embedding
 
         # ---------- Transformer Blocks ----------
-        num_layers = getattr(self.config, 'num_encoder_layers')
-        self.blocks = nn.ModuleList([TransformerBlock(self.config) for _ in range(num_layers)])
+        num_layers = getattr(self.config, 'num_decoder_layers')
+        num_layers_per_hierarchy = num_layers // self.num_hierarchy
+        all_num_layers = [
+            num_layers_per_hierarchy if i < self.num_hierarchy - 1 else num_layers - (num_layers_per_hierarchy * (self.num_hierarchy - 1))
+            for i in range(self.num_hierarchy)
+        ]
+        all_num_layers.reverse()
+        self.all_blocks = nn.ModuleList([
+            nn.ModuleList([TransformerBlock(self.config) for _ in range(all_num_layers[i])])
+            for i in range(self.num_hierarchy)
+        ])
+        # self.blocks = nn.ModuleList([TransformerBlock(self.config) for _ in range(num_layers)])
         
         # ---------- Output Projection ----------
-        self.norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
-        out_channels = out_channels * (spatial_compression ** 2) * temporal_compression
-        self.output_proj = nn.Linear(self.config.hidden_size, out_channels, bias=False)
-        nn.init.normal_(self.output_proj.weight, mean=0.0, std=self.config.initializer_range)
-
-        # ---------- Unpatchify ----------
-        self.patch_size = kwargs.get('patch_size', 8)
-        assert self.patch_size <= spatial_compression
-        assert spatial_compression % self.patch_size == 0, f"spatial_compression ({spatial_compression}) must be divisible by patch_size ({self.patch_size}) for proper unpatchification"
-        assert self.patch_size == temporal_compression, f"patch_size ({self.patch_size}) must equal temporal_compression ({temporal_compression}) for proper unpatchification"
-        # Currently UnPatcher3D does not support tuple patch_size
-        self.unpatcher = UnPatcher3D(patch_size=self.patch_size) 
-        # We need to further rearange the tokens to satisfy compression rate
-        self.extra_spatial_compression = spatial_compression // self.patch_size
-        self.extra_temporal_compression = temporal_compression // self.patch_size
+        input_channels = [self.config.hidden_size] * (self.num_hierarchy - 1) + [out_channels]
+        patch_dims = [
+            input_channels[i] * self.temporal_compression_sequence[i] * (self.spatial_compression_sequence[i] ** 2)
+            for i in range(self.num_hierarchy)
+        ]
+        self.patch_norms = nn.ModuleList(
+            [RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
+            for i in range(self.num_hierarchy)]
+        )
+        self.patch_projs = nn.ModuleList(
+            [nn.Linear(self.config.hidden_size, patch_dims[i], bias=False)
+            for i in range(self.num_hierarchy)]
+        )
+        for i in range(self.num_hierarchy):
+            nn.init.normal_(self.patch_projs[i].weight, mean=0.0, std=self.config.initializer_range)
+        
 
     def forward(
             self, 
@@ -409,50 +557,34 @@ class DecoderViT(nn.Module):
             cache: Optional[Dict[str, torch.Tensor]] = None,
             training: bool = True) -> Tuple[torch.Tensor, Dict[str, Any]]:
         # Input shape: (B, z_channels, T, H, W)
-        B, C, T, H, W = x.shape
-        
         # ---------- 1. Reshape to 1D ----------
+        B, C, T, H, W = x.shape
         x = x.reshape(B, C, -1)  # (B, z_channels, T*H*W)
         x = x.permute(0, 2, 1)  # (B, T*H*W, z_channels)
         
         # ---------- 2. Input Projection ----------
-        x = self.input_proj(x)  # (B, T*H*W, hidden_size)
-        
-        # ---------- 3. Add Positional Embedding ----------
-        if encoding_mask is not None:
-            keep_embed = self.is_kept_embed.unsqueeze(1)  # (1, 1, hidden_size)
-            mask_embed = self.is_masked_embed.unsqueeze(1)  # (1, 1, hidden_size)
-            x = x + torch.where(encoding_mask.unsqueeze(-1), keep_embed, mask_embed)
+        x = self.input_proj(x)  # (B, T*H*W, C)
+        x = x.permute(0, 2, 1)  # (B, C, T*H*W)
+        x = x.reshape(B, -1, T, H, W)  # (B, C, T, H, W)
 
-        # TODO: Add forward concatenated with latent tokens
-        
-        # ---------- 4. Transformer Forward ----------
-        for blk in self.blocks:
-            x = blk(
-                x,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                cache=cache
-            )  # Maintains shape (B, T*H*W, hidden_size)
-        
-        # ---------- 5. Output Projection ----------
-        x = self.norm(x)  # (B, T*H*W, hidden_size)
-        x = self.output_proj(x)  # (B, T*H*W, out_channels*patch_size^3)
+        x = x + self.temporal_embed.permute(1, 0)[None, :, :T, None, None]  # (B, C, T, H, W)
 
-        # TODO: Extract masked tokens
-        
-        # ---------- 6. Unpatchify to 3D ----------
-        x = x.permute(0, 2, 1)  # (B, out_channels*patch_size^3, T*H*W)
-        x = x.reshape(B, -1, T, H, W)  # (B, out_channels*patch_size^3, T, H, W)
-        if self.extra_spatial_compression > 1 or self.extra_temporal_compression > 1:
-            x = rearrange(
-                x,
-                "b (c p1 p2 p3) t h w -> b c (t p1) (h p2) (w p3)",
-                p1=self.extra_temporal_compression,
-                p2=self.extra_spatial_compression,
-                p3=self.extra_spatial_compression,
-            ).contiguous()
-        
-        x = self.unpatcher(x)  # (B, out_channels, T*patch_size, H*patch_size, W*patch_size)
-        
+
+        for i in range(self.num_hierarchy):
+            B, C, T, H, W = x.shape
+            x = x.reshape(B, C, -1)  # (B, C, T*H*W)
+            x = x.permute(0, 2, 1)  # (B, T*H*W, C)
+            for blk in self.all_blocks[i]:
+                x = blk(
+                    x,
+                    attention_mask=attention_mask,
+                    position_ids=(T, H, W),
+                    cache=cache
+                )
+            x = self.patch_norms[i](x)  # (B, T*H*W, C)
+            x = self.patch_projs[i](x)  # (B, T*H*W, D)
+            x = x.permute(0, 2, 1)  # (B, D, T*H*W)
+            x = x.reshape(B, -1, T, H, W)  # (B, D, T, H, W)
+            x = self.unpatchers[i](x)  # (B, D', T', H', W')
+            
         return x

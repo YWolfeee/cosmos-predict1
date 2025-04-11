@@ -175,6 +175,55 @@ class Patcher3D(Patcher):
         return x
 
 
+class Patcher3DArbitrary(torch.nn.Module):
+    def __init__(
+            self,
+            spatial_patch_size: int = 1,
+            temporal_patch_size: int = 1,
+            patch_method: str = "rearrange",
+        ):
+        super().__init__()
+        self.spatial_patch_size = spatial_patch_size
+        self.temporal_patch_size = temporal_patch_size
+        self.patch_method = patch_method
+        self.register_buffer(
+            "spatial_patch_size_buffer",
+            spatial_patch_size * torch.ones([1], dtype=torch.int32),
+            persistent=_PERSISTENT,
+        )
+        self.register_buffer(
+            "temporal_patch_size_buffer",
+            temporal_patch_size * torch.ones([1], dtype=torch.int32),
+            persistent=_PERSISTENT,
+        )
+        for param in self.parameters():
+            param.requires_grad = False
+        
+    def _haar(self, x):
+        raise NotImplementedError("Patching with haar is not implemented yet.")
+
+    def _arrange(self, x):
+        xi, xv = torch.split(x, [1, x.shape[2] - 1], dim=2)
+        x = torch.cat([xi.repeat_interleave(self.temporal_patch_size, dim=2), xv], dim=2)
+        x = rearrange(
+            x,
+            "b c (t p1) (h p2) (w p3) -> b (c p1 p2 p3) t h w",
+            p1=self.temporal_patch_size,
+            p2=self.spatial_patch_size,
+            p3=self.spatial_patch_size,
+        ).contiguous()
+        return x
+    
+    def forward(self, x):
+        if self.patch_method == "haar":
+            return self._haar(x)
+        elif self.patch_method == "rearrange":
+            return self._arrange(x)
+        else:
+            raise ValueError("Unknown patch method: " + self.patch_method)
+
+
+
 class UnPatcher(torch.nn.Module):
     """A module to convert patches into image tensorsusing torch operations.
 
@@ -308,4 +357,51 @@ class UnPatcher3D(UnPatcher):
             p3=self.patch_size,
         )
         x = x[:, :, self.patch_size - 1 :, ...]
+        return x
+
+
+class UnPatcher3DArbitrary(torch.nn.Module):
+    def __init__(
+            self,
+            spatial_patch_size: int = 1,
+            temporal_patch_size: int = 1,
+            patch_method: str = "rearrange",
+        ):
+        super().__init__()
+        self.spatial_patch_size = spatial_patch_size
+        self.temporal_patch_size = temporal_patch_size
+        self.patch_method = patch_method
+        self.register_buffer(
+            "spatial_patch_size_buffer",
+            spatial_patch_size * torch.ones([1], dtype=torch.int32),
+            persistent=_PERSISTENT,
+        )
+        self.register_buffer(
+            "temporal_patch_size_buffer",
+            temporal_patch_size * torch.ones([1], dtype=torch.int32),
+            persistent=_PERSISTENT,
+        )
+        for param in self.parameters():
+            param.requires_grad = False
+    
+    def forward(self, x):
+        if self.patch_method == "haar":
+            return self._ihaar(x)
+        elif self.patch_method == "rearrange":
+            return self._iarrange(x)
+        else:
+            raise ValueError("Unknown patch method: " + self.patch_method)
+        
+    def _ihaar(self, x):
+        raise NotImplementedError("Unpatching with haar is not implemented yet.")
+    
+    def _iarrange(self, x):
+        x = rearrange(
+            x,
+            "b (c p1 p2 p3) t h w -> b c (t p1) (h p2) (w p3)",
+            p1=self.temporal_patch_size,
+            p2=self.spatial_patch_size,
+            p3=self.spatial_patch_size,
+        )
+        x = x[:, :, self.temporal_patch_size - 1 :, ...]
         return x
