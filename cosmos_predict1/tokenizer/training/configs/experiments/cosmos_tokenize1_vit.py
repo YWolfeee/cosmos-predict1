@@ -107,6 +107,8 @@ TEMPORAL_COMPRESSION = 1
 TEMPORAL_COMPRESSION_SEQUENCE = [1, 1, 1]
 SPATIAL_COMPRESSION = 16
 SPATIAL_COMPRESSION_SEQUENCE = [4, 2, 2]
+MIN_TOKENS_RATE = 1 / 16
+MEAN_TOKENS_RATE = 1 / 2
 
 # ------------ ViT backbone config ------------
 
@@ -156,8 +158,8 @@ ADV8x16x16_256p_ImageNet_Posttrain: LazyDict = LazyDict(
                         initializer_range=0.02,
                         use_3d_rotary=False,
                     ),
-                    min_tokens=16,
-                    max_tokens=1024,
+                    min_tokens_rate=MIN_TOKENS_RATE,
+                    mean_tokens_rate=MEAN_TOKENS_RATE,
                     rate_strategy='uniform',
                 )
             )

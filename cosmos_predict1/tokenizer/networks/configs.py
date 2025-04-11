@@ -212,9 +212,9 @@ adaptive_discrete_video = dict(
     spatial_compression=16,
     temporal_compression=8,
     # Adaptive tokenization parameters
-    min_tokens=256,
-    max_tokens=2048,
-    rate_strategy="elbo",  # Options: uniform, elbo
+    min_tokens_rate=1/16,
+    mean_tokens_rate=1/2,
+    rate_strategy="elbo",  # Options: uniform, elbo, static
     # Quantizer parameters
     quantizer=DiscreteQuantizer.FSQ.name,
     embedding_dim=6,
