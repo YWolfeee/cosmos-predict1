@@ -95,7 +95,7 @@ def precompute_freqs_cis_2d(dim: int, height: int, width: int, theta: float) -> 
     )
 
     freqs_2d = torch.polar(torch.ones_like(freqs_2d), freqs_2d) # (height, width, dim // 2)
-    sin, cos = freqs_2d.real, freqs_2d.imag   
+    cos, sin = freqs_2d.real, freqs_2d.imag   
     # Combine cos/sin into last dimension
     return torch.stack([cos, sin], dim=-1)  # [height, width, dim //2, 2]
 
