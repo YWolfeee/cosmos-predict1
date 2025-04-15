@@ -234,6 +234,9 @@ class RotaryMultiheadAttention(nn.Module):
             # For advanced usage, you'd gather exact freq for each position, but here we
             # assume sequences are uniform (like Llama).
             q, k = apply_rotary_emb(q, k, self.freqs_cis)
+        elif self.config.concat_decode_2d:
+            # TODO: Implement seperated 2d rope for 2d tokens, not sure how to deal with 1d tokens
+            raise NotImplementedError("Not implemented yet")
         else:
             # apply 3D rotary embedding
             T, H, W = position_ids
@@ -259,19 +262,9 @@ class RotaryMultiheadAttention(nn.Module):
         #   handle extending k, v, etc.
         #   omitted here for brevity
 
-        # MHA expects (batch_first=True)
-        # Convert an attention_mask [B, S] of 1/0 into a "key_padding_mask" of shape [B, S].
-        # We interpret 1 => keep, 0 => pad
-        key_padding_mask = None
-        if attention_mask is not None:
-            # We want 1 => "non-masked" and 0 => "masked" for MHA's key_padding_mask
-            # However, PyTorch MHA's key_padding_mask has True => masked, False => keep
-            # So we invert
-            key_padding_mask = (attention_mask < 1)
-
         out, _ = self.mha(
             q, k, v,
-            key_padding_mask=key_padding_mask,
+            attn_mask=attention_mask,
             need_weights=False
         )
         return out
@@ -305,7 +298,8 @@ class TransformerBlock(nn.Module):
         self.attention_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.ffn_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-        self.attention = RotaryMultiheadAttention(config, use_1d_rotary=config.switch_rotary_to_1d <= layer_loc)
+        self.use_1d_rotary = config.switch_rotary_to_1d <= layer_loc # For accessment from DecoderViT
+        self.attention = RotaryMultiheadAttention(config, use_1d_rotary=self.use_1d_rotary)
         self.mlp = MLP(config)
 
     def forward(self, hidden_states: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, 
@@ -470,7 +464,10 @@ class DecoderViT(nn.Module):
 
         self.patch_proj = nn.Linear(self.config.hidden_size, patch_dims, bias=False)
         nn.init.normal_(self.patch_proj.weight, mean=0.0, std=self.config.initializer_range)
-        
+
+        # ---------- Causal Mask ----------
+        if self.config.use_causal_decode_1d:
+            self.register_buffer('causal_mask', torch.triu(torch.ones(self.config.max_sequence_length_1d, self.config.max_sequence_length_1d, dtype=torch.bool), diagonal=1))
 
     def forward(
             self, 
@@ -498,6 +495,16 @@ class DecoderViT(nn.Module):
         x = x.reshape(B, C, -1)  # (B, C, T*H*W)
         x = x.permute(0, 2, 1)  # (B, T*H*W, C)
         for blk in self.all_blocks:
+            # Add causal mask at 1d decoding stage
+            if self.config.use_causal_decode_1d and blk.use_1d_rotary:
+                causal_mask = self.causal_mask[:x.shape[1], :x.shape[1]]
+                attention_mask = causal_mask if attention_mask is None else attention_mask | causal_mask
+            
+            # Switch from 1d to 2d by concatenating tokens
+            if self.config.concat_decode_2d:
+                # TODO: Implement concatenating 2d tokens with 1d decoded tokens for finegrained decoding
+                raise NotImplementedError("Not implemented yet")
+
             x = blk(
                 x,
                 attention_mask=attention_mask,
