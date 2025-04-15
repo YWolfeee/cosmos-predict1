@@ -29,6 +29,39 @@ from cosmos_predict1.tokenizer.modules.utils import default, entropy, pack_one, 
 _PERSISTENT = True
 
 
+class CascadeFSQuantizer(nn.Module):
+    """Cascade Finite Scalar Quantization
+
+    """
+
+    def __init__(self, levels: list[int], num_quantizers: int, **ignore_kwargs):
+        super().__init__()
+        self.dtype = ignore_kwargs.get("dtype", torch.float32)
+        self.layers = nn.ModuleList([FSQuantizer(levels=levels) for _ in range(num_quantizers + 1)])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        indices_stack = []
+        residual = x
+        quantized_out = 0
+        loss_out = 0
+        for i, layer in enumerate(self.layers[:-1]):
+            quant_indices, z, loss = layer(residual)
+            indices_stack.append(quant_indices)
+            residual = residual - z.detach()
+            quantized_out = quantized_out + z
+            loss_out = loss_out + loss
+        self.residual = residual
+
+        indices, quantized_out, loss = self.layers[-1](
+            quantized_out / (len(self.layers) - 1))
+        loss_out += loss
+
+        return indices, quantized_out.to(self.dtype), loss_out.to(self.dtype)
+
+    def indices_to_codes(self, indices: torch.Tensor) -> torch.Tensor:
+        return self.layers[-1].indices_to_codes(indices)
+
+
 class ResidualFSQuantizer(nn.Module):
     """Residual Finite Scalar Quantization
 

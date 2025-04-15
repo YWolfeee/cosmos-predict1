@@ -175,6 +175,28 @@ class Patcher3D(Patcher):
         return x
 
 
+class RegularPatcher3D(Patcher3D):
+    """A 3D discrete wavelet transform for video data, expects 5D tensor, i.e. a batch of videos."""
+
+    def __init__(self, patch_size=1, patch_method="haar"):
+        super().__init__(patch_method=patch_method, patch_size=patch_size)
+
+    def _haar(self, x):
+        for _ in self.range:
+            x = self._dwt(x, "haar", rescale=True)
+        return x
+
+    def _arrange(self, x):
+        x = rearrange(
+            x,
+            "b c (t p1) (h p2) (w p3) -> b (c p1 p2 p3) t h w",
+            p1=self.patch_size,
+            p2=self.patch_size,
+            p3=self.patch_size,
+        ).contiguous()
+        return x
+
+
 class Patcher3DArbitrary(torch.nn.Module):
     def __init__(
             self,
@@ -359,6 +381,27 @@ class UnPatcher3D(UnPatcher):
         x = x[:, :, self.patch_size - 1 :, ...]
         return x
 
+
+class RegularUnPatcher3D(UnPatcher3D):
+    """A 3D inverse discrete wavelet transform for video wavelet decompositions."""
+
+    def __init__(self, patch_size=1, patch_method="haar"):
+        super().__init__(patch_method=patch_method, patch_size=patch_size)
+
+    def _ihaar(self, x):
+        for _ in self.range:
+            x = self._idwt(x, "haar", rescale=True)
+        return x
+
+    def _iarrange(self, x):
+        x = rearrange(
+            x,
+            "b (c p1 p2 p3) t h w -> b c (t p1) (h p2) (w p3)",
+            p1=self.patch_size,
+            p2=self.patch_size,
+            p3=self.patch_size,
+        )
+        return x
 
 class UnPatcher3DArbitrary(torch.nn.Module):
     def __init__(

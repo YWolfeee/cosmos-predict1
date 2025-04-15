@@ -94,8 +94,9 @@ def precompute_freqs_cis_2d(dim: int, height: int, width: int, theta: float) -> 
         dim=-1,
     )
 
+    # (height, width, dim // 2)
     freqs_2d = torch.polar(torch.ones_like(freqs_2d), freqs_2d) # (height, width, dim // 2)
-    sin, cos = freqs_2d.real, freqs_2d.imag   
+    cos, sin = freqs_2d.real, freqs_2d.imag   
     # Combine cos/sin into last dimension
     return torch.stack([cos, sin], dim=-1)  # [height, width, dim //2, 2]
 
@@ -109,6 +110,8 @@ def apply_rotary_emb_2d(q: torch.Tensor, k: torch.Tensor, freqs_cis: torch.Tenso
     """
     bsz, h, w, n_heads, head_dim = q.shape
     # slice out the needed positions
+    assert freqs_cis.shape[0] >= h, f"freqs_cis.shape[0] = {freqs_cis.shape[0]} must be >= h = {h}"
+    assert freqs_cis.shape[1] >= w, f"freqs_cis.shape[1] = {freqs_cis.shape[1]} must be >= w = {w}"
     freqs_cis = freqs_cis[:h, :w]  # shape [h, w, head_dim//2, 2]
 
     # Expand to shape [1, h, w, 1, head_dim//2, 2]
@@ -142,6 +145,7 @@ def apply_rotary_emb(q: torch.Tensor, k: torch.Tensor, freqs_cis: torch.Tensor) 
     """
     bsz, seq_len, n_heads, head_dim = q.shape
     # slice out the needed positions
+    assert freqs_cis.shape[0] >= seq_len, f"freqs_cis.shape[0] = {freqs_cis.shape[0]} must be >= seq_len = {seq_len}"
     freqs_cis = freqs_cis[:seq_len]  # shape [seq_len, head_dim//2, 2]
     # Expand to shape [1, seq_len, 1, head_dim//2, 2]
     freqs_cis = freqs_cis.unsqueeze(0).unsqueeze(2)
@@ -171,7 +175,7 @@ def apply_rotary_emb(q: torch.Tensor, k: torch.Tensor, freqs_cis: torch.Tensor) 
 # ------------------------------------------------------
 
 class RotaryMultiheadAttention(nn.Module):
-    def __init__(self, config: Dict):
+    def __init__(self, config: Dict, use_1d_rotary: bool = False):
         super().__init__()
         self.config = config
         embed_dim = config.hidden_size
@@ -179,12 +183,13 @@ class RotaryMultiheadAttention(nn.Module):
         self.head_dim = embed_dim // num_heads
 
         self.mha = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
+        self.use_1d_rotary = use_1d_rotary
 
-        if not config.use_3d_rotary:
+        if self.use_1d_rotary:
             # Build a buffer for rotary
             self.register_buffer(
                 'freqs_cis',
-                precompute_freqs_cis(self.head_dim, config.max_sequence_length, config.theta),
+                precompute_freqs_cis(self.head_dim, config.max_sequence_length_1d, config.theta),
                 persistent=False
             )
         else:
@@ -223,7 +228,13 @@ class RotaryMultiheadAttention(nn.Module):
         n_heads = self.mha.num_heads
         head_dim = E // n_heads
 
-        if self.config.use_3d_rotary:
+        if self.use_1d_rotary:
+            q = q.view(B, S, n_heads, head_dim)
+            k = k.view(B, S, n_heads, head_dim)
+            # For advanced usage, you'd gather exact freq for each position, but here we
+            # assume sequences are uniform (like Llama).
+            q, k = apply_rotary_emb(q, k, self.freqs_cis)
+        else:
             # apply 3D rotary embedding
             T, H, W = position_ids
             q = q.view(B, T, H, W, n_heads, head_dim)
@@ -238,12 +249,6 @@ class RotaryMultiheadAttention(nn.Module):
             q = rearrange(q, "(b t) h w n d -> b t h w n d", b=B, t=T)
             k = rearrange(k, "(b t) h w n d -> b t h w n d", b=B, t=T)
 
-        else:
-            q = q.view(B, S, n_heads, head_dim)
-            k = k.view(B, S, n_heads, head_dim)
-            # For advanced usage, you'd gather exact freq for each position, but here we
-            # assume sequences are uniform (like Llama).
-            q, k = apply_rotary_emb(q, k, self.freqs_cis)
 
         # Reshape back to [B, S, E]
         q = q.view(B, S, E)
@@ -295,12 +300,12 @@ class MLP(nn.Module):
 # ------------------------------------------------------------------
 
 class TransformerBlock(nn.Module):
-    def __init__(self, config: Dict):
+    def __init__(self, config: Dict, layer_loc: float):
         super().__init__()
         self.attention_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.ffn_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-        self.attention = RotaryMultiheadAttention(config)
+        self.attention = RotaryMultiheadAttention(config, use_1d_rotary=config.switch_rotary_to_1d <= layer_loc)
         self.mlp = MLP(config)
 
     def forward(self, hidden_states: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, 
@@ -340,29 +345,13 @@ class EncoderViT(nn.Module):
         # ---------- Patchify ----------
         # self.patch_size = kwargs.get('patch_size', 8)
         self.patch_method = kwargs.get('patch_method', "rearrange")
-        self.spatial_compression_sequence = kwargs.get(
-            'spatial_compression_sequence',
-            [spatial_compression]
-        )
         self.spatial_compression = spatial_compression
-        self.temporal_compression_sequence = kwargs.get(
-            'temporal_compression_sequence',
-            [temporal_compression]
-        )
         self.temporal_compression = temporal_compression
-
-        # assert the product of spatial_compression_sequence equals spatial_compression
-        assert self.spatial_compression == np.prod(self.spatial_compression_sequence)
-        assert self.temporal_compression == np.prod(self.temporal_compression_sequence)
-        assert len(self.spatial_compression_sequence) == len(self.temporal_compression_sequence)
-        self.num_hierarchy = len(self.spatial_compression_sequence)
-
-        self.patchers = nn.ModuleList(
-            [Patcher3DArbitrary(
-                spatial_patch_size=self.spatial_compression_sequence[i],
-                temporal_patch_size=self.temporal_compression_sequence[i],
-                patch_method=self.patch_method,
-            ) for i in range(self.num_hierarchy)]
+        
+        self.patcher = Patcher3DArbitrary(
+            spatial_patch_size=self.spatial_compression,
+            temporal_patch_size=self.temporal_compression,
+            patch_method=self.patch_method,
         )
 
         # TODO: Add 1D latent tokens & Learnable Positional Embedding
@@ -374,35 +363,18 @@ class EncoderViT(nn.Module):
         nn.init.kaiming_normal_(self.temporal_embed)
 
         # ---------- Input Projection ----------
-        input_channels = [in_channels] + [self.config.hidden_size] * (self.num_hierarchy - 1)
-        patch_dims = [
-            input_channels[i] * self.temporal_compression_sequence[i] * (self.spatial_compression_sequence[i] ** 2)
-            for i in range(self.num_hierarchy)
-        ]
-        self.patch_norms = nn.ModuleList(
-            [RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
-            for i in range(self.num_hierarchy)]
-        )
-        self.patch_projs = nn.ModuleList(
-            [nn.Linear(patch_dims[i], self.config.hidden_size, bias=False)
-            for i in range(self.num_hierarchy)]
-        )
-        for i in range(self.num_hierarchy):
-            nn.init.normal_(self.patch_projs[i].weight, mean=0.0, std=self.config.initializer_range)
+        patch_dims = in_channels * self.temporal_compression * self.spatial_compression ** 2
+
+        self.patch_norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
+
+        self.patch_proj = nn.Linear(patch_dims, self.config.hidden_size, bias=False)
+        nn.init.normal_(self.patch_proj.weight, mean=0.0, std=self.config.initializer_range)
 
         # ---------- Transformer Blocks ----------
         num_layers = getattr(self.config, 'num_encoder_layers')
-        num_layers_per_hierarchy = num_layers // self.num_hierarchy
-        all_num_layers = [
-            num_layers_per_hierarchy if i < self.num_hierarchy - 1 else num_layers - (num_layers_per_hierarchy * (self.num_hierarchy - 1))
-            for i in range(self.num_hierarchy)
-        ]
-        self.all_blocks = nn.ModuleList([
-            nn.ModuleList([TransformerBlock(self.config) for _ in range(all_num_layers[i])])
-            for i in range(self.num_hierarchy)
-        ])
+        self.all_blocks = nn.ModuleList([TransformerBlock(self.config, layer_loc=i/num_layers) for i in range(num_layers)])
+        print([w.attention.use_1d_rotary for w in self.all_blocks])
 
-        # self.blocks = nn.ModuleList([TransformerBlock(self.config) for _ in range(num_layers)])
         
         # ---------- Output Projection ----------
         # self.norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
@@ -418,40 +390,29 @@ class EncoderViT(nn.Module):
                 training: bool = True) -> Tuple[torch.Tensor, Dict[str, Any]]:
         # x: (B, C, T, H, W)
 
-        for i in range(self.num_hierarchy):
-            # ---------- 1.Patchify ----------
-            x = self.patchers[i](x)  # (B, C', T', H', W')
-            B, C, T, H, W = x.shape
-            x = x.reshape(B, C, -1)  # (B, C', T'*H'*W')
-            x = x.permute(0, 2, 1)  # (B, T'*H'*W', C)
-            # ---------- 2. Input Projection ----------
-            x = self.patch_projs[i](x)  # (B, T'*H'*W', D)
-
-            # apply learnable 
-            x = x.reshape(B, T, H * W, -1) + self.temporal_embed[None, :T, None]
-            x = x.reshape(B, T * H * W, -1)
-
-            # ---------- 3. Add Positional Embedding ----------
-            # ---------- 4. Transformer Forward ----------
-            for blk in self.all_blocks[i]:
-                x = blk(
-                    x,
-                    attention_mask=attention_mask,
-                    position_ids=(T, H, W),
-                    cache=cache
-                )
-            
-            x = self.patch_norms[i](x)  # (B, T'*H'*W', D)
-            x = x.permute(0, 2, 1)  # (B, D, T'*H'*W')
-            x = x.reshape(B, -1, T, H, W)  # (B, D, T', H', W')
-
-        # TODO: Extract latent tokens
-        
-        # ---------- 5. Output Projection ----------
-        # x = self.norm(x)  # (B, T * H * W, D)
+        # ---------- 1.Patchify ----------
+        x = self.patcher(x)  # (B, C', T', H', W')
         B, C, T, H, W = x.shape
-        x = x.reshape(B, C, -1)  # (B, C, T*H*W)
-        x = x.permute(0, 2, 1)  # (B, T*H*W, C)
+        x = x.reshape(B, C, -1)  # (B, C', T'*H'*W')
+        x = x.permute(0, 2, 1)  # (B, T'*H'*W', C)
+        # ---------- 2. Input Projection ----------
+        x = self.patch_proj(x)  # (B, T'*H'*W', D)
+
+        # apply learnable 
+        x = x.reshape(B, T, H * W, -1) + self.temporal_embed[None, :T, None]
+        x = x.reshape(B, T * H * W, -1)
+
+        # ---------- 3. Add Positional Embedding ----------
+        # ---------- 4. Transformer Forward ----------
+        for blk in self.all_blocks:
+            x = blk(
+                x,
+                attention_mask=attention_mask,
+                position_ids=(T, H, W),
+                cache=cache
+            )
+        
+        x = self.patch_norm(x)  # (B, T'*H'*W', D)
         x = self.output_proj(x)  # (B, T * H * W, z_channels)
         
         # ---------- 6. Reshape to 3D ----------
@@ -478,31 +439,13 @@ class DecoderViT(nn.Module):
         # ---------- Unpatchify ----------
         # self.patch_size = kwargs.get('patch_size', 8)
         self.patch_method = kwargs.get('patch_method', "rearrange")
-        self.spatial_compression_sequence = kwargs.get(
-            'spatial_compression_sequence',
-            [spatial_compression]
-        )
-        # reverse the compression rate to get the decompression rate for decoder
-        self.spatial_compression_sequence.reverse()
         self.spatial_compression = spatial_compression
-        self.temporal_compression_sequence = kwargs.get(
-            'temporal_compression_sequence',
-            [temporal_compression]
-        )
-        self.temporal_compression_sequence.reverse()
         self.temporal_compression = temporal_compression
-        # assert the product of spatial_compression_sequence equals spatial_compression
-        assert self.spatial_compression == np.prod(self.spatial_compression_sequence)
-        assert self.temporal_compression == np.prod(self.temporal_compression_sequence)
-        assert len(self.spatial_compression_sequence) == len(self.temporal_compression_sequence)
-        self.num_hierarchy = len(self.spatial_compression_sequence)
 
-        self.unpatchers = nn.ModuleList(
-            [UnPatcher3DArbitrary(
-                spatial_patch_size=self.spatial_compression_sequence[i],
-                temporal_patch_size=self.temporal_compression_sequence[i],
-                patch_method=self.patch_method,
-            ) for i in range(self.num_hierarchy)]
+        self.unpatcher = UnPatcher3DArbitrary(
+            spatial_patch_size=self.spatial_compression,
+            temporal_patch_size=self.temporal_compression,
+            patch_method=self.patch_method,
         )
 
         # ---------- Input Projection ----------
@@ -518,34 +461,15 @@ class DecoderViT(nn.Module):
 
         # ---------- Transformer Blocks ----------
         num_layers = getattr(self.config, 'num_decoder_layers')
-        num_layers_per_hierarchy = num_layers // self.num_hierarchy
-        all_num_layers = [
-            num_layers_per_hierarchy if i < self.num_hierarchy - 1 else num_layers - (num_layers_per_hierarchy * (self.num_hierarchy - 1))
-            for i in range(self.num_hierarchy)
-        ]
-        all_num_layers.reverse()
-        self.all_blocks = nn.ModuleList([
-            nn.ModuleList([TransformerBlock(self.config) for _ in range(all_num_layers[i])])
-            for i in range(self.num_hierarchy)
-        ])
-        # self.blocks = nn.ModuleList([TransformerBlock(self.config) for _ in range(num_layers)])
+        self.all_blocks = nn.ModuleList([TransformerBlock(self.config, layer_loc=(num_layers - i - 1)/num_layers) for i in range(num_layers)])
+        print([w.attention.use_1d_rotary for w in self.all_blocks])
         
         # ---------- Output Projection ----------
-        input_channels = [self.config.hidden_size] * (self.num_hierarchy - 1) + [out_channels]
-        patch_dims = [
-            input_channels[i] * self.temporal_compression_sequence[i] * (self.spatial_compression_sequence[i] ** 2)
-            for i in range(self.num_hierarchy)
-        ]
-        self.patch_norms = nn.ModuleList(
-            [RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
-            for i in range(self.num_hierarchy)]
-        )
-        self.patch_projs = nn.ModuleList(
-            [nn.Linear(self.config.hidden_size, patch_dims[i], bias=False)
-            for i in range(self.num_hierarchy)]
-        )
-        for i in range(self.num_hierarchy):
-            nn.init.normal_(self.patch_projs[i].weight, mean=0.0, std=self.config.initializer_range)
+        patch_dims = out_channels * self.temporal_compression * (self.spatial_compression ** 2)
+        self.patch_norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
+
+        self.patch_proj = nn.Linear(self.config.hidden_size, patch_dims, bias=False)
+        nn.init.normal_(self.patch_proj.weight, mean=0.0, std=self.config.initializer_range)
         
 
     def forward(
@@ -570,21 +494,20 @@ class DecoderViT(nn.Module):
         x = x + self.temporal_embed.permute(1, 0)[None, :, :T, None, None]  # (B, C, T, H, W)
 
 
-        for i in range(self.num_hierarchy):
-            B, C, T, H, W = x.shape
-            x = x.reshape(B, C, -1)  # (B, C, T*H*W)
-            x = x.permute(0, 2, 1)  # (B, T*H*W, C)
-            for blk in self.all_blocks[i]:
-                x = blk(
-                    x,
-                    attention_mask=attention_mask,
-                    position_ids=(T, H, W),
-                    cache=cache
-                )
-            x = self.patch_norms[i](x)  # (B, T*H*W, C)
-            x = self.patch_projs[i](x)  # (B, T*H*W, D)
-            x = x.permute(0, 2, 1)  # (B, D, T*H*W)
-            x = x.reshape(B, -1, T, H, W)  # (B, D, T, H, W)
-            x = self.unpatchers[i](x)  # (B, D', T', H', W')
+        B, C, T, H, W = x.shape
+        x = x.reshape(B, C, -1)  # (B, C, T*H*W)
+        x = x.permute(0, 2, 1)  # (B, T*H*W, C)
+        for blk in self.all_blocks:
+            x = blk(
+                x,
+                attention_mask=attention_mask,
+                position_ids=(T, H, W),
+                cache=cache
+            )
+        x = self.patch_norm(x)  # (B, T*H*W, C)
+        x = self.patch_proj(x)  # (B, T*H*W, D)
+        x = x.permute(0, 2, 1)  # (B, D, T*H*W)
+        x = x.reshape(B, -1, T, H, W)  # (B, D, T, H, W)
+        x = self.unpatcher(x)  # (B, D', T', H', W')
             
         return x

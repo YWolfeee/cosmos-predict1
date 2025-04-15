@@ -33,80 +33,10 @@ MIN_NUM_TOKENS = MAX_NUM_TOKENS // 16 # if MAX_NUM_TOKENS = 4096, MIN_NUM_TOKENS
 # ------------ ViT backbone config ------------
 
 
-Adaptive_Tokenize1_ADV8x16x16_720p_HDVILA: LazyDict = LazyDict(
-    dict(
-        defaults=[
-            "/experiment/video_basic",
-            {"override /network": "adaptive_discrete_video"},
-            {"override /data_train": "hdvila_video720"},
-            {"override /data_val": "hdvila_video720"},
-            "_self_",
-        ],
-        dataloader_train=dict(
-            dataset=dict(
-                crop_height=CROP_HEIGHT,
-                num_video_frames=NUM_VIDEO_FRAMES,
-            ),
-            batch_size=1,
-        ),
-        dataloader_val=dict(
-            dataset=dict(
-                crop_height=CROP_HEIGHT,
-                num_video_frames=NUM_VIDEO_FRAMES,
-            ),
-            batch_size=1,
-        ),
-        model=dict(
-            config=dict(
-                network=dict(
-                    patch_size=TEMPORAL_COMPRESSION,
-                    legacy_mode=False,
-                    temporal_compression=TEMPORAL_COMPRESSION, # This should be exactly the same as patch_size to ensure the code is excutable
-                    spatial_compression=SPATIAL_COMPRESSION, # This should be patch_size*n (n=1,2,...)
-                    num_video_frames=NUM_VIDEO_FRAMES,
-                    crop_height=CROP_HEIGHT,
-                    vit_config=dict(
-                        hidden_size=1024,
-                        intermediate_size=2048,
-                        num_encoder_layers=10,
-                        num_decoder_layers=10,
-                        num_attention_heads=16,
-                        max_sequence_length=4096,
-                        theta=10000.0,
-                        rms_norm_eps=1e-5,
-                        initializer_range=0.02,
-                        use_latent=False
-                    ),
-                    min_tokens=MIN_NUM_TOKENS,
-                    max_tokens=MAX_NUM_TOKENS,
-                    rate_strategy='uniform'
-                )
-            )
-        ),
-        job=dict(
-            project="posttraining",
-            group="tokenizer",
-            name="Adaptive_Tokenize1_ADV8x16x16_720p_HDVILA",
-        ),
-        checkpoint=dict(
-            strict_resume=True,
-            load_training_state=True,
-            jit=dict(input_shape=[1, 3, NUM_VIDEO_FRAMES, CROP_HEIGHT, CROP_HEIGHT]),
-        ),
-    )
-)
-
 # -------------------------------------------------
 # Hyperparameters of experiments on adaptive tokenization of ImageNet
 # -------------------------------------------------
 
-NUM_VIDEO_FRAMES = 1 # Image as 1-Frame Video Training
-CROP_HEIGHT = 256 # This indicates the largest width / height of the video
-BATCH_SIZE = 32
-TEMPORAL_COMPRESSION = 1
-TEMPORAL_COMPRESSION_SEQUENCE = [1, 1, 1]
-SPATIAL_COMPRESSION = 16
-SPATIAL_COMPRESSION_SEQUENCE = [4, 2, 2]
 
 # ------------ ViT backbone config ------------
 
@@ -117,48 +47,48 @@ ADV8x16x16_256p_ImageNet_Posttrain: LazyDict = LazyDict(
             {"override /network": "adaptive_discrete_video"},
             {"override /data_train": "imagenet_video256"},
             {"override /data_val": "imagenet_video256"},
+            {"override /scheduler": "warmup_cosine"},
             "_self_",
         ],
         dataloader_train=dict(
             dataset=dict(
-                crop_height=CROP_HEIGHT,
-                num_video_frames=NUM_VIDEO_FRAMES,
+                crop_height=256,
+                num_video_frames=1,
             ),
-            batch_size=BATCH_SIZE,
+            batch_size=16,
         ),
         dataloader_val=dict(
             dataset=dict(
-                crop_height=CROP_HEIGHT,
-                num_video_frames=NUM_VIDEO_FRAMES,
+                crop_height=256,
+                num_video_frames=1,
             ),
-            batch_size=BATCH_SIZE,
+            batch_size=16,
         ),
         model=dict(
             config=dict(
                 network=dict(
+                    quantizer="CASFSQ",
+                    num_quantizers=4,
+                    patch_size=1,
                     legacy_mode=False,
-                    patch_method="rearrange",
-                    spatial_compression=SPATIAL_COMPRESSION, # This should be patch_size*n (n=1,2,...)
-                    spatial_compression_sequence=SPATIAL_COMPRESSION_SEQUENCE,
-                    temporal_compression=TEMPORAL_COMPRESSION, # This should be exactly the same as patch_size to ensure the code is excutable
-                    temporal_compression_sequence=TEMPORAL_COMPRESSION_SEQUENCE,
-                    num_video_frames=NUM_VIDEO_FRAMES,
-                    crop_height=CROP_HEIGHT,
+                    temporal_compression=8,
+                    spatial_compression=8,
+                    num_video_frames=49,
+                    # model specific parameters
+                    crop_height=256,
                     vit_config=dict(
-                        hidden_size=1024,
-                        intermediate_size=2048,
-                        num_encoder_layers=10,
-                        num_decoder_layers=10,
-                        num_attention_heads=16,
-                        max_sequence_length=4096,
+                        hidden_size=1024, # 768 for DEBUG, 4096 for full
+                        intermediate_size=2048, # 768 for DEBUG, 4096 for full
+                        num_encoder_layers=10, # 4 for DEBUG, 10 for full
+                        num_decoder_layers=10, # 4 for DEBUG, 10 for full
+                        num_attention_heads=32, # 16 for DEBUG, 32 for full
                         theta=10000.0,
                         rms_norm_eps=1e-5,
                         initializer_range=0.02,
-                        use_3d_rotary=False,
+                        switch_rotary_to_1d=1.0,
+                        max_sequence_length=96,
+                        max_sequence_length_1d=8192,
                     ),
-                    min_tokens=16,
-                    max_tokens=1024,
-                    rate_strategy='uniform',
                 )
             )
         ),
@@ -170,8 +100,14 @@ ADV8x16x16_256p_ImageNet_Posttrain: LazyDict = LazyDict(
         checkpoint=dict(
             strict_resume=True,
             load_training_state=True,
-            jit=dict(input_shape=[1, 3, NUM_VIDEO_FRAMES, CROP_HEIGHT, CROP_HEIGHT]),
+            jit=dict(input_shape=[1, 3, 1, 256, 256]),
         ),
+        scheduler=dict(
+            warmup_iters=5000,
+            lr_decay_iters=100000,
+            min_lr=1e-5,
+        ),
+
     )
 )
 
@@ -179,7 +115,6 @@ ADV8x16x16_256p_ImageNet_Posttrain: LazyDict = LazyDict(
 cs = ConfigStore.instance()
 
 for _item in [
-    Adaptive_Tokenize1_ADV8x16x16_720p_HDVILA, # Register this for post-train verification
     ADV8x16x16_256p_ImageNet_Posttrain, # Register this for ImageNet training (image-as-video)
 ]:
     experiment_name = [name for name, value in globals().items() if value is _item][0]
