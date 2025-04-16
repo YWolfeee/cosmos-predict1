@@ -185,14 +185,15 @@ class RotaryMultiheadAttention(nn.Module):
         self.mha = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
         self.use_1d_rotary = use_1d_rotary
 
-        if self.use_1d_rotary:
+        if self.use_1d_rotary or self.config.concat_decode_2d: # If not use_1d_rotary but concat, freqs_cis is required as well
             # Build a buffer for rotary
             self.register_buffer(
                 'freqs_cis',
                 precompute_freqs_cis(self.head_dim, config.max_sequence_length_1d, config.theta),
                 persistent=False
             )
-        else:
+        
+        if not self.use_1d_rotary:
             # Build a buffer for 2D rotary
             self.register_buffer(
                 'freqs_cis_2d',
@@ -227,6 +228,7 @@ class RotaryMultiheadAttention(nn.Module):
         # Now reshape Q/K for rotary
         n_heads = self.mha.num_heads
         head_dim = E // n_heads
+        T, H, W = position_ids
 
         if self.use_1d_rotary:
             q = q.view(B, S, n_heads, head_dim)
@@ -234,12 +236,36 @@ class RotaryMultiheadAttention(nn.Module):
             # For advanced usage, you'd gather exact freq for each position, but here we
             # assume sequences are uniform (like Llama).
             q, k = apply_rotary_emb(q, k, self.freqs_cis)
-        elif self.config.concat_decode_2d:
-            # TODO: Implement seperated 2d rope for 2d tokens, not sure how to deal with 1d tokens
-            raise NotImplementedError("Not implemented yet")
+        
+        elif self.config.concat_decode_2d and S > T*H*W: # use_2d_rotary but x is concated as [x_1d, x_2d] in sequence
+            q = q.view(B, S, n_heads, head_dim)
+            k = k.view(B, S, n_heads, head_dim)
+            
+            # Apply 1d rotary embedding on 1d tokens
+            q_1d = q[:, :-T*H*W, :, :]
+            k_1d = k[:, :-T*H*W, :, :]
+            q_1d, k_1d = apply_rotary_emb(q_1d, k_1d, self.freqs_cis)
+            
+            # Apply 2d rotary embedding on 2d tokens
+            q_2d = q[:, -T*H*W:, :, :]
+            q_2d = q_2d.view(B, T, H, W, n_heads, head_dim)
+            k_2d = k[:, -T*H*W:, :, :]
+            k_2d = k_2d.view(B, T, H, W, n_heads, head_dim)
+            # merge T to batch dimension to apply rotary embedding
+            q_2d = rearrange(q_2d, "b t h w n d -> (b t) h w n d")
+            k_2d = rearrange(k_2d, "b t h w n d -> (b t) h w n d")
+            # apply rotary embedding
+            q_2d, k_2d = apply_rotary_emb_2d(q_2d, k_2d, self.freqs_cis_2d)
+            # reshape back to [B, T, H, W, n_heads, head_dim]
+            q_2d = rearrange(q_2d, "(b t) h w n d -> b (t h w) n d", b=B, t=T)
+            k_2d = rearrange(k_2d, "(b t) h w n d -> b (t h w) n d", b=B, t=T)
+            
+            # Merge 2d tokens back with 1d tokens
+            q = torch.cat([q_1d, q_2d], dim=1)
+            k = torch.cat([k_1d, k_2d], dim=1)
+            
         else:
             # apply 3D rotary embedding
-            T, H, W = position_ids
             q = q.view(B, T, H, W, n_heads, head_dim)
             k = k.view(B, T, H, W, n_heads, head_dim)
 
@@ -469,6 +495,15 @@ class DecoderViT(nn.Module):
         if self.config.use_causal_decode_1d:
             self.register_buffer('causal_mask', torch.triu(torch.ones(self.config.max_sequence_length_1d, self.config.max_sequence_length_1d, dtype=torch.bool), diagonal=1))
 
+        # ---------- 2D Decoding ----------
+        if self.config.concat_decode_2d:
+            self.pos_emb_1d = nn.Parameter(torch.empty(self.config.max_sequence_length_1d, self.config.hidden_size))
+            self.pos_emb_2d = nn.Parameter(torch.empty(self.config.max_sequence_length * self.config.max_sequence_length, self.config.hidden_size))
+            nn.init.kaiming_normal_(self.pos_emb_1d)
+            nn.init.kaiming_normal_(self.pos_emb_2d)
+            scale = self.config.initializer_range / math.sqrt(self.config.hidden_size)
+            self.masked_token = nn.Parameter(torch.randn(1, 1, self.config.hidden_size) * scale)
+
     def forward(
             self, 
             x: torch.Tensor,
@@ -494,23 +529,32 @@ class DecoderViT(nn.Module):
         B, C, T, H, W = x.shape
         x = x.reshape(B, C, -1)  # (B, C, T*H*W)
         x = x.permute(0, 2, 1)  # (B, T*H*W, C)
+        switch_2d = False
         for blk in self.all_blocks:
             # Add causal mask at 1d decoding stage
             if self.config.use_causal_decode_1d and blk.use_1d_rotary:
                 causal_mask = self.causal_mask[:x.shape[1], :x.shape[1]]
-                attention_mask = causal_mask if attention_mask is None else attention_mask | causal_mask
+                applied_attention_mask = causal_mask if attention_mask is None else attention_mask | causal_mask
+            else:
+                applied_attention_mask = attention_mask
             
-            # Switch from 1d to 2d by concatenating tokens
-            if self.config.concat_decode_2d:
-                # TODO: Implement concatenating 2d tokens with 1d decoded tokens for finegrained decoding
-                raise NotImplementedError("Not implemented yet")
+            # Switch from 1d to 2d by concatenating tokens, only applicable at first 2d block
+            if self.config.concat_decode_2d and not blk.use_1d_rotary and not switch_2d: # 2d blk
+                x_1d = x + self.pos_emb_1d[None, :x.shape[1], :] # x_1d can be adaptive in the future
+                x_2d = self.masked_token.expand(x.shape[0], x.shape[1], -1) + self.pos_emb_2d[None, :T*H*W, :]
+                x = torch.cat([x_1d, x_2d], dim=1)
+                switch_2d = True
 
             x = blk(
                 x,
-                attention_mask=attention_mask,
+                attention_mask=applied_attention_mask,
                 position_ids=(T, H, W),
                 cache=cache
             )
+
+        if self.config.concat_decode_2d:
+            x = x[:, -T*H*W:, :] # The output is 2d tokens
+        
         x = self.patch_norm(x)  # (B, T*H*W, C)
         x = self.patch_proj(x)  # (B, T*H*W, D)
         x = x.permute(0, 2, 1)  # (B, D, T*H*W)

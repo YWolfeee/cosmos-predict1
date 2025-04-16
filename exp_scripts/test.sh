@@ -11,7 +11,7 @@ conda activate cosmos
 timestamp=$(date +%Y%m%d%H%M%S)
 head_count=8
 rate_startegy="static"
-batch_size=4
+batch_size=2
 grad_accum_iter=1
 host_id=29501
 

@@ -89,7 +89,7 @@ ADV8x16x16_256p_ImageNet_Posttrain: LazyDict = LazyDict(
                         max_sequence_length=96,
                         max_sequence_length_1d=8192,
                         use_causal_decode_1d=True,
-                        concat_decode_2d=False,
+                        concat_decode_2d=True,
                     ),
                 )
             )
