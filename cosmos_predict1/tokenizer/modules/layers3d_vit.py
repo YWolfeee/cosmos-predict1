@@ -231,26 +231,28 @@ class RotaryMultiheadAttention(nn.Module):
         T, H, W = position_ids
 
         if self.use_1d_rotary:
-            q = q.view(B, S, n_heads, head_dim)
-            k = k.view(B, S, n_heads, head_dim)
+            q = q.view(B * T, -1, n_heads, head_dim)
+            k = k.view(B * T, -1, n_heads, head_dim)
             # For advanced usage, you'd gather exact freq for each position, but here we
             # assume sequences are uniform (like Llama).
             q, k = apply_rotary_emb(q, k, self.freqs_cis)
+            q = q.view(B, -1, n_heads, head_dim)
+            k = k.view(B, -1, n_heads, head_dim)
         
         elif self.config.concat_decode_2d and S > T*H*W: # use_2d_rotary but x is concated as [x_1d, x_2d] in sequence
             q = q.view(B, S, n_heads, head_dim)
             k = k.view(B, S, n_heads, head_dim)
             
             # Apply 1d rotary embedding on 1d tokens
-            q_1d = q[:, :-T*H*W, :, :]
-            k_1d = k[:, :-T*H*W, :, :]
+            q_1d = q[:, :-T*H*W, :, :].view(B * T, -1, n_heads, head_dim)
+            k_1d = k[:, :-T*H*W, :, :].view(B * T, -1, n_heads, head_dim)
             q_1d, k_1d = apply_rotary_emb(q_1d, k_1d, self.freqs_cis)
+            q_1d = q_1d.view(B, -1, n_heads, head_dim)
+            k_1d = k_1d.view(B, -1, n_heads, head_dim)
             
             # Apply 2d rotary embedding on 2d tokens
-            q_2d = q[:, -T*H*W:, :, :]
-            q_2d = q_2d.view(B, T, H, W, n_heads, head_dim)
-            k_2d = k[:, -T*H*W:, :, :]
-            k_2d = k_2d.view(B, T, H, W, n_heads, head_dim)
+            q_2d = q[:, -T*H*W:, :, :].view(B, T, H, W, n_heads, head_dim)
+            k_2d = k[:, -T*H*W:, :, :].view(B, T, H, W, n_heads, head_dim)
             # merge T to batch dimension to apply rotary embedding
             q_2d = rearrange(q_2d, "b t h w n d -> (b t) h w n d")
             k_2d = rearrange(k_2d, "b t h w n d -> (b t) h w n d")
@@ -497,12 +499,11 @@ class DecoderViT(nn.Module):
 
         # ---------- 2D Decoding ----------
         if self.config.concat_decode_2d:
-            self.pos_emb_1d = nn.Parameter(torch.empty(self.config.max_sequence_length_1d, self.config.hidden_size))
-            self.pos_emb_2d = nn.Parameter(torch.empty(self.config.max_sequence_length * self.config.max_sequence_length, self.config.hidden_size))
-            nn.init.kaiming_normal_(self.pos_emb_1d)
-            nn.init.kaiming_normal_(self.pos_emb_2d)
-            scale = self.config.initializer_range / math.sqrt(self.config.hidden_size)
-            self.masked_token = nn.Parameter(torch.randn(1, 1, self.config.hidden_size) * scale)
+            assert not self.all_blocks[-1].use_1d_rotary, ValueError("When using concat_decode_2d, at least the last decoder layer should be using 2d embeddings.")
+            self.pos_emb_1d = nn.Parameter(torch.randn(self.config.hidden_size) * self.config.initializer_range)
+            self.pos_emb_2d = nn.Parameter(torch.randn(self.config.hidden_size) * self.config.initializer_range)
+            self.masked_token = nn.Parameter(torch.randn(self.config.max_sequence_length, self.config.max_sequence_length, self.config.hidden_size) * self.config.initializer_range)
+
 
     def forward(
             self, 
@@ -540,8 +541,10 @@ class DecoderViT(nn.Module):
             
             # Switch from 1d to 2d by concatenating tokens, only applicable at first 2d block
             if self.config.concat_decode_2d and not blk.use_1d_rotary and not switch_2d: # 2d blk
-                x_1d = x + self.pos_emb_1d[None, :x.shape[1], :] # x_1d can be adaptive in the future
-                x_2d = self.masked_token.expand(x.shape[0], x.shape[1], -1) + self.pos_emb_2d[None, :T*H*W, :]
+                x_1d = x + self.pos_emb_1d # x_1d can be adaptive in the future
+                x_2d = self.masked_token[:H, :W].reshape(H*W, -1)
+                x_2d = x_2d[None, None].repeat(B, T, 1, 1) + self.pos_emb_2d
+                x_2d = (x_2d + self.temporal_embed[None, :T, None]).view(B, T*H*W, -1)
                 x = torch.cat([x_1d, x_2d], dim=1)
                 switch_2d = True
 
