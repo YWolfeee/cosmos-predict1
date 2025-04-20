@@ -500,6 +500,7 @@ class DecoderViT(nn.Module):
         # ---------- 2D Decoding ----------
         if self.config.concat_decode_2d:
             assert not self.all_blocks[-1].use_1d_rotary, ValueError("When using concat_decode_2d, at least the last decoder layer should be using 2d embeddings.")
+            assert self.all_blocks[0].use_causal_decode_1d, ValueError("When using concat_decode_2d, the first decoder layer should be using 1d embeddings.")
             self.pos_emb_1d = nn.Parameter(torch.randn(self.config.hidden_size) * self.config.initializer_range)
             self.pos_emb_2d = nn.Parameter(torch.randn(self.config.hidden_size) * self.config.initializer_range)
             self.masked_token = nn.Parameter(torch.randn(self.config.max_sequence_length, self.config.max_sequence_length, self.config.hidden_size) * self.config.initializer_range)
