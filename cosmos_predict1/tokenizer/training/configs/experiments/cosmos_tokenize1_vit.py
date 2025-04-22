@@ -32,6 +32,83 @@ MIN_NUM_TOKENS = MAX_NUM_TOKENS // 16 # if MAX_NUM_TOKENS = 4096, MIN_NUM_TOKENS
 
 # ------------ ViT backbone config ------------
 
+ADV4x8x8_256p_HDVILA_Posttrain: LazyDict = LazyDict(
+    dict(
+        defaults=[
+            "/experiment/video_basic",
+            {"override /network": "adaptive_discrete_video"},
+            {"override /data_train": "hdvila_video256"},
+            {"override /data_val": "hdvila_video256"},
+            {"override /scheduler": "warmup_cosine"},
+            "_self_",
+        ],
+        dataloader_train=dict(
+            dataset=dict(
+                crop_height=256,
+                num_video_frames=33,
+            ),
+            batch_size=1,
+        ),
+        dataloader_val=dict(
+            dataset=dict(
+                crop_height=256,
+                num_video_frames=33,
+            ),
+            batch_size=1,
+        ),
+        model=dict(
+            config=dict(
+                network=dict(
+                    quantizer="CASFSQ",
+                    num_quantizers=4,
+                    patch_size=1,
+                    legacy_mode=False,
+                    temporal_compression=4,
+                    spatial_compression=8,
+                    num_video_frames=49,
+                    # model specific parameters
+                    crop_height=256,
+                    vit_config=dict(
+                        hidden_size=1024, # 768 for DEBUG, 4096 for full
+                        intermediate_size=2048, # 768 for DEBUG, 4096 for full
+                        num_encoder_layers=10, # 4 for DEBUG, 10 for full
+                        num_decoder_layers=10, # 4 for DEBUG, 10 for full
+                        num_attention_heads=32, # 16 for DEBUG, 32 for full
+                        theta=10000.0,
+                        rms_norm_eps=1e-5,
+                        initializer_range=0.02,
+                        switch_rotary_to_1d=0.5,
+                        max_sequence_length=96,
+                        max_sequence_length_1d=8192,
+                        use_causal_decode_1d=True,
+                        concat_decode_2d=True,
+                    ),
+                    # adaptive settings: IMPORTANT UPDATE
+                    min_tokens_rate=0.06,
+                    mean_tokens_rate=0.5, # Recover originally full training via mean_tokens_rate=1.0, static rate_strategy
+                    rate_strategy="uniform", # ["static", "elbo"]
+                )
+            )
+        ),
+        job=dict(
+            project="imagenet_posttraining",
+            group="tokenizer",
+            name="ADV4x8x8_256p_HDVILA_Posttrain",
+        ),
+        checkpoint=dict(
+            strict_resume=True,
+            load_training_state=True,
+            jit=dict(input_shape=[1, 3, 1, 256, 256]),
+        ),
+        scheduler=dict(
+            warmup_iters=5000,
+            lr_decay_iters=100000,
+            min_lr=1e-5,
+        ),
+
+    )
+)
+
 
 # -------------------------------------------------
 # Hyperparameters of experiments on adaptive tokenization of ImageNet
@@ -91,6 +168,10 @@ ADV8x16x16_256p_ImageNet_Posttrain: LazyDict = LazyDict(
                         use_causal_decode_1d=True,
                         concat_decode_2d=True,
                     ),
+                    # adaptive settings
+                    min_tokens_rate=0.06,
+                    mean_tokens_rate=0.5, # Recover originally full training via mean_tokens_rate=1.0, static rate_strategy
+                    rate_strategy="uniform", # ["static", "elbo"]
                 )
             )
         ),
@@ -118,6 +199,7 @@ cs = ConfigStore.instance()
 
 for _item in [
     ADV8x16x16_256p_ImageNet_Posttrain, # Register this for ImageNet training (image-as-video)
+    ADV4x8x8_256p_HDVILA_Posttrain, # Register this for HDVILA training (video), DEBUG used
 ]:
     experiment_name = [name for name, value in globals().items() if value is _item][0]
 
@@ -138,3 +220,4 @@ for _item in [
         name=mock_experiment,
         node=_debug_item,
     )
+

@@ -206,11 +206,18 @@ class RotaryMultiheadAttention(nn.Module):
         nn.init.zeros_(self.mha.in_proj_bias)
         nn.init.normal_(self.mha.out_proj.weight, mean=0.0, std=config.initializer_range)
 
-    def forward(self, hidden_states: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, 
-                position_ids: Optional[torch.Tensor] = None, cache: Optional[Dict[str, torch.Tensor]] = None) -> torch.Tensor:
+    def forward(
+        self, 
+        hidden_states: torch.Tensor,
+        encoding_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None, 
+        position_ids: Optional[torch.Tensor] = None, 
+        cache: Optional[Dict[str, torch.Tensor]] = None
+    ) -> torch.Tensor:
         """
         hidden_states: [B, S, E]
-        attention_mask: [B, S] where 0=masked, 1=keep, or None
+        encoding_mask: [B, S], 1 indicates the token is masked, 0 indicates the token is visible, used for adaptive tokenization
+        attention_mask: [S, S] where 1=masked, 0=keep, or None
         position_ids: [B, S], optional
         cache: optional dict for incremental decode
         """
@@ -293,6 +300,7 @@ class RotaryMultiheadAttention(nn.Module):
         out, _ = self.mha(
             q, k, v,
             attn_mask=attention_mask,
+            key_padding_mask=encoding_mask,
             need_weights=False
         )
         return out
@@ -330,11 +338,17 @@ class TransformerBlock(nn.Module):
         self.attention = RotaryMultiheadAttention(config, use_1d_rotary=self.use_1d_rotary)
         self.mlp = MLP(config)
 
-    def forward(self, hidden_states: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, 
-                position_ids: Optional[torch.Tensor] = None, cache: Optional[Dict[str, torch.Tensor]] = None) -> torch.Tensor:
+    def forward(
+        self, 
+        hidden_states: torch.Tensor, 
+        encoding_mask: Optional[torch.Tensor] = None, 
+        attention_mask: Optional[torch.Tensor] = None, 
+        position_ids: Optional[torch.Tensor] = None, 
+        cache: Optional[Dict[str, torch.Tensor]] = None
+    ) -> torch.Tensor:
         # Attention
         attn_in = self.attention_norm(hidden_states)
-        attn_out = self.attention(attn_in, attention_mask=attention_mask, position_ids=position_ids, cache=cache)
+        attn_out = self.attention(attn_in, encoding_mask=encoding_mask, attention_mask=attention_mask, position_ids=position_ids, cache=cache)
         hidden_states = hidden_states + attn_out
 
         # MLP
@@ -395,7 +409,7 @@ class EncoderViT(nn.Module):
         # ---------- Transformer Blocks ----------
         num_layers = getattr(self.config, 'num_encoder_layers')
         self.all_blocks = nn.ModuleList([TransformerBlock(self.config, layer_loc=i/num_layers) for i in range(num_layers)])
-        print([w.attention.use_1d_rotary for w in self.all_blocks])
+        print("1D block across encoder:", [w.attention.use_1d_rotary for w in self.all_blocks])
 
         
         # ---------- Output Projection ----------
@@ -484,7 +498,7 @@ class DecoderViT(nn.Module):
         # ---------- Transformer Blocks ----------
         num_layers = getattr(self.config, 'num_decoder_layers')
         self.all_blocks = nn.ModuleList([TransformerBlock(self.config, layer_loc=(num_layers - i - 1)/num_layers) for i in range(num_layers)])
-        print([w.attention.use_1d_rotary for w in self.all_blocks])
+        print("1D block across decoder:", [w.attention.use_1d_rotary for w in self.all_blocks])
         
         # ---------- Output Projection ----------
         patch_dims = out_channels * self.temporal_compression * (self.spatial_compression ** 2)
@@ -496,6 +510,8 @@ class DecoderViT(nn.Module):
         # ---------- Causal Mask ----------
         if self.config.use_causal_decode_1d:
             self.register_buffer('causal_mask', torch.triu(torch.ones(self.config.max_sequence_length_1d, self.config.max_sequence_length_1d, dtype=torch.bool), diagonal=1))
+            # This is used for concat_decode_2d, the attention mask should include 2d tokens as well
+            self.register_buffer('full_attn_mask', torch.zeros(self.config.max_sequence_length_1d * 2, self.config.max_sequence_length_1d * 2, dtype=torch.bool))
 
         # ---------- 2D Decoding ----------
         if self.config.concat_decode_2d:
@@ -511,9 +527,18 @@ class DecoderViT(nn.Module):
             x: torch.Tensor,
             encoding_mask: Optional[torch.Tensor] = None,
             attention_mask: Optional[torch.Tensor] = None,
-            position_ids: Optional[torch.Tensor] = None,
-            cache: Optional[Dict[str, torch.Tensor]] = None,
-            training: bool = True) -> Tuple[torch.Tensor, Dict[str, Any]]:
+            cache: Optional[Dict[str, torch.Tensor]] = None) -> torch.Tensor:
+        """Forward pass of the ViT-based 3D decoder.
+        
+        Args:
+            x: Input tensor of shape [B, z_channels, T, H, W]
+            encoding_mask: [B, T*H*W], 1 indicates the token is masked, 0 indicates the token is visible, used for adaptive tokenization
+            attention_mask: [T*H*W, T*H*W], 1 indicates the token is masked, 0 indicates the token is visible, currently as placeholder
+            cache: Optional key-value cache for transformer blocks
+            
+        Returns:
+            Decoded tensor of shape [B, out_channels, T, H, W]
+        """
         # Input shape: (B, z_channels, T, H, W)
         # ---------- 1. Reshape to 1D ----------
         B, C, T, H, W = x.shape
@@ -527,21 +552,32 @@ class DecoderViT(nn.Module):
 
         x = x + self.temporal_embed.permute(1, 0)[None, :, :T, None, None]  # (B, C, T, H, W)
 
-
         B, C, T, H, W = x.shape
         x = x.reshape(B, C, -1)  # (B, C, T*H*W)
         x = x.permute(0, 2, 1)  # (B, T*H*W, C)
         switch_2d = False
         for blk in self.all_blocks:
             # Add causal mask at 1d decoding stage
+            applied_attention_mask = None
+            applied_encoding_mask = None
             if self.config.use_causal_decode_1d and blk.use_1d_rotary:
                 causal_mask = self.causal_mask[:x.shape[1], :x.shape[1]]
                 applied_attention_mask = causal_mask if attention_mask is None else attention_mask | causal_mask
+                applied_encoding_mask = encoding_mask
+            # Expanding encoding mask and attention mask to adate to [x_1d, x_2d] rather than x_1d
+            elif self.config.concat_decode_2d and not blk.use_1d_rotary:
+                if attention_mask is not None:
+                    applied_attention_mask = self.full_attn_mask[:2*x.shape[1], :2*x.shape[1]]
+                    applied_attention_mask[:x.shape[1], :x.shape[1]] = attention_mask
+                if encoding_mask is not None:
+                    applied_encoding_mask = torch.cat([encoding_mask, torch.zeros_like(encoding_mask)], dim=-1) # zero indicates all 2d concated tokens are visible for each 1d token
+            # Otherwise, keep original attention mask and encoding mask
             else:
                 applied_attention_mask = attention_mask
+                applied_encoding_mask = encoding_mask
             
             # Switch from 1d to 2d by concatenating tokens, only applicable at first 2d block
-            if self.config.concat_decode_2d and not blk.use_1d_rotary and not switch_2d: # 2d blk
+            if self.config.concat_decode_2d and not blk.use_1d_rotary and not switch_2d: # the first 2d block
                 x_1d = x + self.pos_emb_1d # x_1d can be adaptive in the future
                 x_2d = self.masked_token[:H, :W].reshape(H*W, -1)
                 x_2d = x_2d[None, None].repeat(B, T, 1, 1) + self.pos_emb_2d
@@ -551,6 +587,7 @@ class DecoderViT(nn.Module):
 
             x = blk(
                 x,
+                encoding_mask=applied_encoding_mask,
                 attention_mask=applied_attention_mask,
                 position_ids=(T, H, W),
                 cache=cache

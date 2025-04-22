@@ -35,101 +35,119 @@ class AdaptiveTokenizationModule(nn.Module):
     """
     
     def __init__(self, 
-                 min_tokens: int = 256, 
-                 max_tokens: int = 2048,
+                 min_tokens_rate: float = 0.06, 
+                 mean_tokens_rate: float = 0.5,
                  rate_strategy: str = 'uniform',
                  **kwargs) -> None:
         """Initialize the adaptive tokenization module.
         
         Args:
-            min_tokens: Minimum number of tokens to allocate per video.
-            max_tokens: Maximum number of tokens to allocate per video.
+            min_tokens_rate: Minimum number of tokens / Full number of tokens, allocated per video.
+            mean_tokens_rate: Mean number of tokens / Full number of tokens, allocated per video.
             rate_strategy: Strategy for determining token allocation rate.
                 Options: 'uniform', 'elbo'.
             **kwargs: Additional kwargs.
         """
         super().__init__()
-        self.min_tokens = min_tokens
-        self.max_tokens = max_tokens
+        self.min_tokens_rate = min_tokens_rate
+        self.mean_tokens_rate = mean_tokens_rate
         self.rate_strategy = rate_strategy
         
-    def compute_token_allocation(self, 
+    def compute_token_allocation(self,
+                                 x: torch.Tensor, 
                                  rate_scores: torch.Tensor, 
                                  total_token_budget: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute token allocation based on rate scores.
         
         Args:
+            x: Tensor of shape [B, C, T, H, W], providing information of T, H, W.
             rate_scores: Tensor of shape [B, T] with scores for each video block.
                          Higher scores indicate more tokens should be allocated.
             total_token_budget: Optional total token budget for the batch.
-                                If None, uses max_tokens * batch_size.
+                                If None, uses mean_tokens * batch_size.
         
         Returns:
             tokens_per_block: Tensor of shape [B, T] with number of tokens per block.
             mask: Binary mask of shape [B, T, max_spatial_tokens] indicating which tokens to keep.
         """
-        batch_size, num_blocks = rate_scores.shape
+        batch_size, _, num_blocks, height, width = x.shape
+        max_tokens_per_video = num_blocks * height * width
+        min_tokens_per_video = int(self.min_tokens_rate * max_tokens_per_video)
+        mean_tokens_per_video = int(self.mean_tokens_rate * max_tokens_per_video)
         
-        # Default budget is max_tokens per video
+        # Default budget is mean_tokens per video
         if total_token_budget is None:
-            total_token_budget = self.max_tokens * batch_size
+            total_token_budget = mean_tokens_per_video * batch_size
             
-        # Apply rate strategy to convert scores to allocation ratios [0, 1]
+        # Apply rate strategy to convert scores to allocation ratios of each block in each batch (sum over blocks of all batch is one)
         if self.rate_strategy == 'uniform':
             # Uniform random allocation
-            allocation_ratios = torch.rand_like(rate_scores)
+            allocation_ratios = torch.rand(batch_size, num_blocks, device=x.device, dtype=x.dtype)
+            allocation_ratios = allocation_ratios / (allocation_ratios.sum() + 1e-8)
         elif self.rate_strategy == 'elbo':
             # Higher rate_scores (lower ELBOs) get more tokens
-            allocation_ratios = rate_scores / (rate_scores.sum(dim=1, keepdim=True) + 1e-8)
+            assert rate_scores is not None, "rate_scores must be provided for elbo strategy"
+            allocation_ratios = rate_scores / (rate_scores.sum() + 1e-8)
+        elif self.rate_strategy == 'static':
+            allocation_ratios = torch.ones(batch_size, num_blocks, device=x.device, dtype=x.dtype)
+            allocation_ratios = allocation_ratios / (allocation_ratios.sum() + 1e-8)
         else:
             raise ValueError(f"Unknown rate strategy: {self.rate_strategy}")
         
         # Compute tokens per block
-        total_blocks = batch_size * num_blocks
-        min_tokens_per_block = torch.ones_like(allocation_ratios) * self.min_tokens / num_blocks
-        remaining_budget = total_token_budget - (self.min_tokens * batch_size)
+        min_tokens_per_block = torch.ones_like(allocation_ratios) * min_tokens_per_video / num_blocks
+        remaining_budget = total_token_budget - (min_tokens_per_video * batch_size)
         
         # Allocate remaining budget according to allocation ratios
-        additional_tokens = allocation_ratios * remaining_budget / batch_size
+        additional_tokens = allocation_ratios * remaining_budget
         tokens_per_block = min_tokens_per_block + additional_tokens
         
         # Ensure max_tokens constraint per video
         tokens_per_video = tokens_per_block.sum(dim=1, keepdim=True)
         scaling_factor = torch.minimum(
             torch.ones_like(tokens_per_video),
-            self.max_tokens / tokens_per_video
+            max_tokens_per_video / tokens_per_video
         )
-        tokens_per_block = tokens_per_block * scaling_factor
+        tokens_per_block = (tokens_per_block * scaling_factor).int()
         
-        return tokens_per_block.int(), self._create_mask_from_allocation(tokens_per_block)
+        return tokens_per_block, self._create_mask_from_allocation(tokens_per_block, max_tokens_per_video)
     
-    def _create_mask_from_allocation(self, tokens_per_block: torch.Tensor) -> torch.Tensor:
+    def _create_mask_from_allocation(self, tokens_per_block: torch.Tensor, max_tokens_per_video: int) -> torch.Tensor:
         """Create a mask from token allocation.
         
         Args:
             tokens_per_block: Tensor of shape [B, T] with number of tokens per block.
             
         Returns:
-            mask: Binary mask of shape [B, T, max_spatial_tokens] 
-                  where max_spatial_tokens is the spatial dimension of tokens.
+            mask: Binary mask of shape [B, T, max_tokens_per_block], 1 for visible tokens and 0 for masked tokens, e.g., [1,1,1,0,0,0,0,0,0,0]
+                  where max_tokens_per_block is the spatial dimension of tokens.
         """
-        # This is a placeholder implementation
-        # Real implementation will depend on the spatial dimension of tokens
         batch_size, num_blocks = tokens_per_block.shape
-        max_spatial_tokens = self.max_tokens // num_blocks
+        max_tokens_per_block = max_tokens_per_video // num_blocks
         
         # Create mask of ones followed by zeros for each block
         masks = []
         for b in range(batch_size):
             block_masks = []
             for t in range(num_blocks):
-                num_tokens = min(tokens_per_block[b, t].item(), max_spatial_tokens)
-                block_mask = torch.zeros(max_spatial_tokens, device=tokens_per_block.device)
+                num_tokens = min(tokens_per_block[b, t].item(), max_tokens_per_block)
+                block_mask = torch.zeros(max_tokens_per_block, device=tokens_per_block.device)
                 block_mask[:num_tokens] = 1.0
                 block_masks.append(block_mask)
             masks.append(torch.stack(block_masks, dim=0))
         
         return torch.stack(masks, dim=0)
+    
+    def invert_mask_for_mha(self, mask: torch.Tensor) -> torch.Tensor:
+        """Invert the mask for MHA.
+        
+        Args:
+            mask: Binary mask of shape [B, T, max_tokens_per_block], 1 for visible tokens and 0 for masked tokens, e.g., [1,1,1,0,0,0,0,0,0,0]
+
+        Returns:
+            mask: Binary mask of shape [B, T, max_tokens_per_block], 0 for visible tokens and 1 for masked tokens, e.g., [0,0,0,1,1,1,1,1,1,1]
+        """
+        return (1 - mask).to(torch.bool)
 
 class AdaptiveDiscreteVideoTokenizer(nn.Module):
     """1D-adaptive discrete video tokenizer.
@@ -158,11 +176,6 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
         self.name = kwargs.get("name", "AdaptiveDiscreteVideoTokenizer")
         self.embedding_dim = embedding_dim
         
-        # Tokenization parameters
-        self.min_tokens = kwargs.get("min_tokens", 256)
-        self.max_tokens = kwargs.get("max_tokens", 2048)
-        self.rate_strategy = kwargs.get("rate_strategy", "uniform")
-        
         # Initialize 3D encoder (similar to CausalDiscreteVideoTokenizer)
         encoder_name = kwargs.get("encoder", Encoder3DType.ViT.name)
         self.encoder = Encoder3DType[encoder_name].value(z_channels=z_factor * z_channels, **kwargs)
@@ -188,7 +201,7 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
             assert "levels" in kwargs, f"`levels` must be provided for {quantizer_name}."
         self.quantizer = DiscreteQuantizer[quantizer_name].value(**kwargs)
         
-        # Adaptive tokenization module, min_tokens, max_tokens, rate_strategy are included in kwargs
+        # Adaptive tokenization module, min_tokens_rate, mean_tokens_rate, rate_strategy are included in kwargs
         self.adaptive_tokenization = AdaptiveTokenizationModule(**kwargs)
         
         logging.info(f"{self.name} based on {quantizer_name}, with {kwargs}.")
@@ -239,7 +252,6 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
             Masked tensor of shape [B, C, L]
         """
         # Expand mask to match dimensions
-        # TODO: This is not necessary if we use attention mask
         mask = mask.unsqueeze(1)  # [B, 1, L]
         return x * mask
     
@@ -255,7 +267,6 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
             quant_codes: Quantized codes
             quant_loss: Quantization loss
         """
-        # TODO: Add attention mask which is both causal and adaptive
         # Encode input to latent representation
         h = self.encoder(x, encoding_mask=None, attention_mask=None)
         h = self.quant_conv(h) # h: (B, embedding_dim, T, H, W)
@@ -266,14 +277,12 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
         # Reshape to 1D sequence
         h_1d = self.reshape_3d_to_1d(h)
         
-        # Compute adaptive token allocation if rate_scores provided
-        mask = None
-        if rate_scores is not None:
-            _, mask = self.adaptive_tokenization.compute_token_allocation(rate_scores)
-            mask_1d = mask.reshape(B, -1)  # Reshape to [B, T*H*W]
-            
-            # Apply mask to 1D sequence
-            h_1d = self.apply_mask(h_1d, mask_1d)
+        # Compute adaptive token allocation
+        tokens_per_block, mask = self.adaptive_tokenization.compute_token_allocation(h, rate_scores)
+        encoding_mask_1d = mask.reshape(B, -1)  # Reshape to [B, T*H*W]
+
+        # Apply mask to 1D sequence
+        h_1d = self.apply_mask(h_1d, encoding_mask_1d)
         
         # Reshape back to 3D for decoder
         h = self.reshape_1d_to_3d(h_1d, T, H, W)
@@ -281,20 +290,21 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
         # Quantize the 1D sequence
         quant_info, quant_codes, quant_loss = self.quantizer(h)
         
-        return quant_info, quant_codes, quant_loss
+        return quant_info, quant_codes, quant_loss, encoding_mask_1d
     
-    def decode(self, quant: torch.Tensor, rate_scores: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def decode(self, quant: torch.Tensor, encoding_mask_1d: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Decode quantized representation to video.
         
         Args:
             quant: Quantized tensor of shape [B, C, T, H, W]
+            encoding_mask_1d: Binary mask of shape [B, T*H*W], 1 for visible tokens and 0 for masked tokens, e.g., [[1,1,1,0,0,0,0,0,0,0]]
             
         Returns:
             Reconstructed video
         """
-        # TODO: Add attention mask for decoder to mask out the unrelated latent tokens
         quant = self.post_quant_conv(quant)
-        return self.decoder(quant, encoding_mask=None, attention_mask=None)
+        mha_encoding_mask = self.adaptive_tokenization.invert_mask_for_mha(encoding_mask_1d) # [[0,0,0,1,1,1,1,1,1,1]]
+        return self.decoder(quant, attention_mask=None, encoding_mask=mha_encoding_mask)
     
     def encoder_jit(self):
         return nn.Sequential(
@@ -329,7 +339,7 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
         """
         quant_b = self.quantizer.indices_to_codes(code_b)
         quant_b = self.post_quant_conv(quant_b)
-        return self.decoder(quant_b, encoding_mask=None, attention_mask=None)
+        return self.decoder(quant_b, attention_mask=None, encoding_mask=None)
     
     def forward(self, input: torch.Tensor, mask_matrix: Optional[torch.Tensor] = None, rate_scores: Optional[torch.Tensor] = None) -> Union[Dict[str, torch.Tensor], NetworkEval]:
         """Forward pass of the tokenizer.
@@ -342,8 +352,8 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
         Returns:
             Dictionary or NetworkEval with reconstructions, quant_loss, and quant_info
         """
-        quant_info, quant_codes, quant_loss = self.encode(input, rate_scores)
-        reconstructions = self.decode(quant_codes, rate_scores)
+        quant_info, quant_codes, quant_loss, encoding_mask_1d = self.encode(input, rate_scores)
+        reconstructions = self.decode(quant_codes, encoding_mask_1d)
         
         if self.training:
             return dict(
