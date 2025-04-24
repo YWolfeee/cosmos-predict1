@@ -45,14 +45,14 @@ ADV4x8x8_256p_HDVILA_Posttrain: LazyDict = LazyDict(
         dataloader_train=dict(
             dataset=dict(
                 crop_height=256,
-                num_video_frames=33,
+                num_video_frames=17,
             ),
             batch_size=1,
         ),
         dataloader_val=dict(
             dataset=dict(
                 crop_height=256,
-                num_video_frames=33,
+                num_video_frames=17,
             ),
             batch_size=1,
         ),

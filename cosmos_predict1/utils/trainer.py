@@ -335,4 +335,4 @@ class Trainer:
                 )
 
         else: # is video
-            raise NotImplementedError("Visualizing video is not implemented yet.")
+            assert False, "Video visualization not implemented"

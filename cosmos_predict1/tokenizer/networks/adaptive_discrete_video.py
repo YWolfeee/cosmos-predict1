@@ -55,16 +55,13 @@ class AdaptiveTokenizationModule(nn.Module):
         
     def compute_token_allocation(self,
                                  x: torch.Tensor, 
-                                 rate_scores: torch.Tensor, 
-                                 total_token_budget: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+                                 rate_scores: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute token allocation based on rate scores.
         
         Args:
             x: Tensor of shape [B, C, T, H, W], providing information of T, H, W.
             rate_scores: Tensor of shape [B, T] with scores for each video block.
                          Higher scores indicate more tokens should be allocated.
-            total_token_budget: Optional total token budget for the batch.
-                                If None, uses mean_tokens * batch_size.
         
         Returns:
             tokens_per_block: Tensor of shape [B, T] with number of tokens per block.
@@ -72,43 +69,33 @@ class AdaptiveTokenizationModule(nn.Module):
         """
         batch_size, _, num_blocks, height, width = x.shape
         max_tokens_per_video = num_blocks * height * width
-        min_tokens_per_video = int(self.min_tokens_rate * max_tokens_per_video)
-        mean_tokens_per_video = int(self.mean_tokens_rate * max_tokens_per_video)
-        
-        # Default budget is mean_tokens per video
-        if total_token_budget is None:
-            total_token_budget = mean_tokens_per_video * batch_size
             
         # Apply rate strategy to convert scores to allocation ratios of each block in each batch (sum over blocks of all batch is one)
         if self.rate_strategy == 'uniform':
             # Uniform random allocation
             allocation_ratios = torch.rand(batch_size, num_blocks, device=x.device, dtype=x.dtype)
-            allocation_ratios = allocation_ratios / (allocation_ratios.sum() + 1e-8)
+        elif self.rate_strategy == 'unibin':
+            # Uniform binary allocation from predefined values
+            bins = torch.tensor([0.0625, 0.125, 0.25, 0.5, 0.75, 1.0], 
+                                          device=x.device, dtype=x.dtype)
+            # Randomly select indices for each batch and block
+            indices = torch.randint(0, len(bins), 
+                                   (batch_size, num_blocks), 
+                                   device=x.device)
+            # Use indices to select values from possible_values
+            allocation_ratios = bins[indices]
         elif self.rate_strategy == 'elbo':
             # Higher rate_scores (lower ELBOs) get more tokens
             assert rate_scores is not None, "rate_scores must be provided for elbo strategy"
-            allocation_ratios = rate_scores / (rate_scores.sum() + 1e-8)
+            allocation_ratios = rate_scores
         elif self.rate_strategy == 'static':
             allocation_ratios = torch.ones(batch_size, num_blocks, device=x.device, dtype=x.dtype)
-            allocation_ratios = allocation_ratios / (allocation_ratios.sum() + 1e-8)
         else:
             raise ValueError(f"Unknown rate strategy: {self.rate_strategy}")
         
         # Compute tokens per block
-        min_tokens_per_block = torch.ones_like(allocation_ratios) * min_tokens_per_video / num_blocks
-        remaining_budget = total_token_budget - (min_tokens_per_video * batch_size)
-        
-        # Allocate remaining budget according to allocation ratios
-        additional_tokens = allocation_ratios * remaining_budget
-        tokens_per_block = min_tokens_per_block + additional_tokens
-        
-        # Ensure max_tokens constraint per video
-        tokens_per_video = tokens_per_block.sum(dim=1, keepdim=True)
-        scaling_factor = torch.minimum(
-            torch.ones_like(tokens_per_video),
-            max_tokens_per_video / tokens_per_video
-        )
-        tokens_per_block = (tokens_per_block * scaling_factor).int()
+        max_tokens_per_block = max_tokens_per_video // num_blocks
+        tokens_per_block = (allocation_ratios * max_tokens_per_block).int()
         
         return tokens_per_block, self._create_mask_from_allocation(tokens_per_block, max_tokens_per_video)
     
@@ -278,11 +265,13 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
         h_1d = self.reshape_3d_to_1d(h)
         
         # Compute adaptive token allocation
-        tokens_per_block, mask = self.adaptive_tokenization.compute_token_allocation(h, rate_scores)
-        encoding_mask_1d = mask.reshape(B, -1)  # Reshape to [B, T*H*W]
-
-        # Apply mask to 1D sequence
-        h_1d = self.apply_mask(h_1d, encoding_mask_1d)
+        if self.training:
+            tokens_per_block, mask = self.adaptive_tokenization.compute_token_allocation(h, rate_scores)
+            encoding_mask_1d = mask.reshape(B, -1)  # Reshape to [B, T*H*W]
+            # Apply mask to 1D sequence
+            h_1d = self.apply_mask(h_1d, encoding_mask_1d)
+        else:
+            encoding_mask_1d = None
         
         # Reshape back to 3D for decoder
         h = self.reshape_1d_to_3d(h_1d, T, H, W)
@@ -303,7 +292,10 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
             Reconstructed video
         """
         quant = self.post_quant_conv(quant)
-        mha_encoding_mask = self.adaptive_tokenization.invert_mask_for_mha(encoding_mask_1d) # [[0,0,0,1,1,1,1,1,1,1]]
+        if encoding_mask_1d is None:
+            mha_encoding_mask = None
+        else:
+            mha_encoding_mask = self.adaptive_tokenization.invert_mask_for_mha(encoding_mask_1d) # [[0,0,0,1,1,1,1,1,1,1]]
         return self.decoder(quant, attention_mask=None, encoding_mask=mha_encoding_mask)
     
     def encoder_jit(self):

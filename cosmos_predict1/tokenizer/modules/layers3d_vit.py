@@ -511,7 +511,7 @@ class DecoderViT(nn.Module):
         if self.config.use_causal_decode_1d:
             self.register_buffer('causal_mask', torch.triu(torch.ones(self.config.max_sequence_length_1d, self.config.max_sequence_length_1d, dtype=torch.bool), diagonal=1))
             # This is used for concat_decode_2d, the attention mask should include 2d tokens as well
-            self.register_buffer('full_attn_mask', torch.zeros(self.config.max_sequence_length_1d * 2, self.config.max_sequence_length_1d * 2, dtype=torch.bool))
+            self.register_buffer('neg_attn_mask', torch.ones(self.config.max_sequence_length_1d * 2, self.config.max_sequence_length_1d * 2, dtype=torch.bool))
 
         # ---------- 2D Decoding ----------
         if self.config.concat_decode_2d:
@@ -553,6 +553,7 @@ class DecoderViT(nn.Module):
         x = x + self.temporal_embed.permute(1, 0)[None, :, :T, None, None]  # (B, C, T, H, W)
 
         B, C, T, H, W = x.shape
+        N = T * H * W
         x = x.reshape(B, C, -1)  # (B, C, T*H*W)
         x = x.permute(0, 2, 1)  # (B, T*H*W, C)
         switch_2d = False
@@ -564,11 +565,14 @@ class DecoderViT(nn.Module):
                 causal_mask = self.causal_mask[:x.shape[1], :x.shape[1]]
                 applied_attention_mask = causal_mask if attention_mask is None else attention_mask | causal_mask
                 applied_encoding_mask = encoding_mask
-            # Expanding encoding mask and attention mask to adate to [x_1d, x_2d] rather than x_1d
+            # Expanding encoding mask and attention mask to adapt to [x_1d, x_2d] rather than x_1d
             elif self.config.concat_decode_2d and not blk.use_1d_rotary:
-                if attention_mask is not None:
-                    applied_attention_mask = self.full_attn_mask[:2*x.shape[1], :2*x.shape[1]]
-                    applied_attention_mask[:x.shape[1], :x.shape[1]] = attention_mask
+                applied_attention_mask = self.neg_attn_mask[:2*N, :2*N]
+                causal_mask_1d = self.causal_mask[:N, :N]
+                applied_attention_mask[:N, :N] = causal_mask_1d if attention_mask is None else attention_mask | causal_mask_1d
+                block_causal_mask = build_block_causal_mask(T, H, W).to(applied_attention_mask.device)
+                applied_attention_mask[N:, :N] = block_causal_mask # 2d refer to 1d
+                applied_attention_mask[N:, N:] = block_causal_mask # 2d refer to 2d
                 if encoding_mask is not None:
                     applied_encoding_mask = torch.cat([encoding_mask, torch.zeros_like(encoding_mask)], dim=-1) # zero indicates all 2d concated tokens are visible for each 1d token
             # Otherwise, keep original attention mask and encoding mask
@@ -603,3 +607,23 @@ class DecoderViT(nn.Module):
         x = self.unpatcher(x)  # (B, D', T', H', W')
             
         return x
+    
+def build_block_causal_mask(T: int, H: int, W: int) -> torch.Tensor:
+    """
+    Constructs a block causal attention mask for a sequence of T blocks,
+    each containing H*W tokens.
+
+    Args:
+        T (int): Number of blocks.
+        H (int): Height of each block.
+        W (int): Width of each block.
+
+    Returns:
+        torch.Tensor: A (T*H*W, T*H*W) attention mask tensor with True indicating
+                      positions that should be masked (i.e., not attended to).
+    """
+    tokens_per_block = H * W  # Tokens per block
+    block_mask = torch.triu(torch.ones((T, T), dtype=torch.bool), diagonal=1)
+    token_mask = block_mask.repeat_interleave(tokens_per_block, dim=0).repeat_interleave(tokens_per_block, dim=1)
+
+    return token_mask
