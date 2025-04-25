@@ -86,7 +86,7 @@ ADV4x8x8_256p_HDVILA_Posttrain: LazyDict = LazyDict(
                     # adaptive settings: IMPORTANT UPDATE
                     min_tokens_rate=0.06,
                     mean_tokens_rate=0.5, # Recover originally full training via mean_tokens_rate=1.0, static rate_strategy
-                    rate_strategy="uniform", # ["static", "elbo"]
+                    rate_strategy="static", # ["static", "elbo"]
                 )
             )
         ),

@@ -238,28 +238,28 @@ class RotaryMultiheadAttention(nn.Module):
         T, H, W = position_ids
 
         if self.use_1d_rotary:
-            q = q.view(B * T, -1, n_heads, head_dim)
-            k = k.view(B * T, -1, n_heads, head_dim)
+            q = q.reshape(B * T, -1, n_heads, head_dim)
+            k = k.reshape(B * T, -1, n_heads, head_dim)
             # For advanced usage, you'd gather exact freq for each position, but here we
             # assume sequences are uniform (like Llama).
             q, k = apply_rotary_emb(q, k, self.freqs_cis)
-            q = q.view(B, -1, n_heads, head_dim)
-            k = k.view(B, -1, n_heads, head_dim)
+            q = q.reshape(B, -1, n_heads, head_dim)
+            k = k.reshape(B, -1, n_heads, head_dim)
         
         elif self.config.concat_decode_2d and S > T*H*W: # use_2d_rotary but x is concated as [x_1d, x_2d] in sequence
-            q = q.view(B, S, n_heads, head_dim)
-            k = k.view(B, S, n_heads, head_dim)
+            q = q.reshape(B, S, n_heads, head_dim)
+            k = k.reshape(B, S, n_heads, head_dim)
             
             # Apply 1d rotary embedding on 1d tokens
-            q_1d = q[:, :-T*H*W, :, :].view(B * T, -1, n_heads, head_dim)
-            k_1d = k[:, :-T*H*W, :, :].view(B * T, -1, n_heads, head_dim)
+            q_1d = q[:, :-T*H*W, :, :].reshape(B * T, -1, n_heads, head_dim)
+            k_1d = k[:, :-T*H*W, :, :].reshape(B * T, -1, n_heads, head_dim)
             q_1d, k_1d = apply_rotary_emb(q_1d, k_1d, self.freqs_cis)
-            q_1d = q_1d.view(B, -1, n_heads, head_dim)
-            k_1d = k_1d.view(B, -1, n_heads, head_dim)
+            q_1d = q_1d.reshape(B, -1, n_heads, head_dim)
+            k_1d = k_1d.reshape(B, -1, n_heads, head_dim)
             
             # Apply 2d rotary embedding on 2d tokens
-            q_2d = q[:, -T*H*W:, :, :].view(B, T, H, W, n_heads, head_dim)
-            k_2d = k[:, -T*H*W:, :, :].view(B, T, H, W, n_heads, head_dim)
+            q_2d = q[:, -T*H*W:, :, :].reshape(B, T, H, W, n_heads, head_dim)
+            k_2d = k[:, -T*H*W:, :, :].reshape(B, T, H, W, n_heads, head_dim)
             # merge T to batch dimension to apply rotary embedding
             q_2d = rearrange(q_2d, "b t h w n d -> (b t) h w n d")
             k_2d = rearrange(k_2d, "b t h w n d -> (b t) h w n d")
@@ -275,8 +275,8 @@ class RotaryMultiheadAttention(nn.Module):
             
         else:
             # apply 3D rotary embedding
-            q = q.view(B, T, H, W, n_heads, head_dim)
-            k = k.view(B, T, H, W, n_heads, head_dim)
+            q = q.reshape(B, T, H, W, n_heads, head_dim)
+            k = k.reshape(B, T, H, W, n_heads, head_dim)
 
             # merge T to batch dimension to apply rotary embedding
             q = rearrange(q, "b t h w n d -> (b t) h w n d")
@@ -510,8 +510,6 @@ class DecoderViT(nn.Module):
         # ---------- Causal Mask ----------
         if self.config.use_causal_decode_1d:
             self.register_buffer('causal_mask', torch.triu(torch.ones(self.config.max_sequence_length_1d, self.config.max_sequence_length_1d, dtype=torch.bool), diagonal=1))
-            # This is used for concat_decode_2d, the attention mask should include 2d tokens as well
-            self.register_buffer('neg_attn_mask', torch.ones(self.config.max_sequence_length_1d * 2, self.config.max_sequence_length_1d * 2, dtype=torch.bool))
 
         # ---------- 2D Decoding ----------
         if self.config.concat_decode_2d:
@@ -539,6 +537,8 @@ class DecoderViT(nn.Module):
         Returns:
             Decoded tensor of shape [B, out_channels, T, H, W]
         """
+
+        assert attention_mask is None, "Attention mask is not supported in the current version of the decoder."
         # Input shape: (B, z_channels, T, H, W)
         # ---------- 1. Reshape to 1D ----------
         B, C, T, H, W = x.shape
@@ -557,22 +557,29 @@ class DecoderViT(nn.Module):
         x = x.reshape(B, C, -1)  # (B, C, T*H*W)
         x = x.permute(0, 2, 1)  # (B, T*H*W, C)
         switch_2d = False
-        for blk in self.all_blocks:
+        block_causal_mask = build_block_causal_mask(T, H, W).to(x.device)
+        for _, blk in enumerate(self.all_blocks):
             # Add causal mask at 1d decoding stage
             applied_attention_mask = None
             applied_encoding_mask = None
             if self.config.use_causal_decode_1d and blk.use_1d_rotary:
-                causal_mask = self.causal_mask[:x.shape[1], :x.shape[1]]
-                applied_attention_mask = causal_mask if attention_mask is None else attention_mask | causal_mask
+                applied_attention_mask = self.causal_mask[:x.shape[1], :x.shape[1]]
                 applied_encoding_mask = encoding_mask
             # Expanding encoding mask and attention mask to adapt to [x_1d, x_2d] rather than x_1d
             elif self.config.concat_decode_2d and not blk.use_1d_rotary:
-                applied_attention_mask = self.neg_attn_mask[:2*N, :2*N]
                 causal_mask_1d = self.causal_mask[:N, :N]
-                applied_attention_mask[:N, :N] = causal_mask_1d if attention_mask is None else attention_mask | causal_mask_1d
-                block_causal_mask = build_block_causal_mask(T, H, W).to(applied_attention_mask.device)
-                applied_attention_mask[N:, :N] = block_causal_mask # 2d refer to 1d
-                applied_attention_mask[N:, N:] = block_causal_mask # 2d refer to 2d
+                up_mask = torch.concat(
+                    [causal_mask_1d, torch.ones_like(causal_mask_1d)],
+                    dim = 1
+                )
+                # concat two block_causal_mask twice over the second dims
+                down_mask = torch.concat(
+                    [block_causal_mask, block_causal_mask],
+                    dim = 1
+                )
+                
+                applied_attention_mask = torch.concat([up_mask, down_mask], 
+                                                      dim = 0)
                 if encoding_mask is not None:
                     applied_encoding_mask = torch.cat([encoding_mask, torch.zeros_like(encoding_mask)], dim=-1) # zero indicates all 2d concated tokens are visible for each 1d token
             # Otherwise, keep original attention mask and encoding mask

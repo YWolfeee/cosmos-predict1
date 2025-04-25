@@ -8,6 +8,7 @@ experiment="ADV8x16x16_256p_ImageNet_Posttrain"
 
 extra_kwargs="
 model.config.network.vit_config.switch_rotary_to_1d=0.5
+model.config.network.rate_strategy='unibin'
 "
 
 
