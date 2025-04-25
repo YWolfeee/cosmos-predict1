@@ -557,24 +557,32 @@ class DecoderViT(nn.Module):
         x = x.reshape(B, C, -1)  # (B, C, T*H*W)
         x = x.permute(0, 2, 1)  # (B, T*H*W, C)
         switch_2d = False
+
+        # Get 1D Attention Mask (Stage 1)
+        causal_mask_1d = self.causal_mask[:N, :N]
+        applied_attention_mask_1d = causal_mask_1d if attention_mask is None else attention_mask | causal_mask_1d
+        applied_encoding_mask_1d = encoding_mask
+
+        # Get 1D+2D Attention Mask (Stage 2)
+        applied_attention_mask_2d = self.neg_attn_mask[:2*N, :2*N]
+        applied_attention_mask_2d[:N, :N] = causal_mask_1d if attention_mask is None else attention_mask | causal_mask_1d
+        block_causal_mask = build_block_causal_mask(T, H, W).to(applied_attention_mask_2d.device)
+        applied_attention_mask_2d[N:, :N] = block_causal_mask # 2d refer to 1d
+        applied_attention_mask_2d[N:, N:] = block_causal_mask # 2d refer to 2d
+        if encoding_mask is not None:
+            applied_encoding_mask_2d = torch.cat([encoding_mask, torch.zeros_like(encoding_mask)], dim=-1)
+        else:
+            applied_encoding_mask_2d = None
+
         for blk in self.all_blocks:
             # Add causal mask at 1d decoding stage
-            applied_attention_mask = None
-            applied_encoding_mask = None
             if self.config.use_causal_decode_1d and blk.use_1d_rotary:
-                causal_mask = self.causal_mask[:x.shape[1], :x.shape[1]]
-                applied_attention_mask = causal_mask if attention_mask is None else attention_mask | causal_mask
-                applied_encoding_mask = encoding_mask
+                applied_attention_mask = applied_attention_mask_1d
+                applied_encoding_mask = applied_encoding_mask_1d
             # Expanding encoding mask and attention mask to adapt to [x_1d, x_2d] rather than x_1d
             elif self.config.concat_decode_2d and not blk.use_1d_rotary:
-                applied_attention_mask = self.neg_attn_mask[:2*N, :2*N]
-                causal_mask_1d = self.causal_mask[:N, :N]
-                applied_attention_mask[:N, :N] = causal_mask_1d if attention_mask is None else attention_mask | causal_mask_1d
-                block_causal_mask = build_block_causal_mask(T, H, W).to(applied_attention_mask.device)
-                applied_attention_mask[N:, :N] = block_causal_mask # 2d refer to 1d
-                applied_attention_mask[N:, N:] = block_causal_mask # 2d refer to 2d
-                if encoding_mask is not None:
-                    applied_encoding_mask = torch.cat([encoding_mask, torch.zeros_like(encoding_mask)], dim=-1) # zero indicates all 2d concated tokens are visible for each 1d token
+                applied_attention_mask = applied_attention_mask_2d
+                applied_encoding_mask = applied_encoding_mask_2d
             # Otherwise, keep original attention mask and encoding mask
             else:
                 applied_attention_mask = attention_mask

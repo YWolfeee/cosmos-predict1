@@ -106,35 +106,23 @@ class AdaptiveTokenizationModule(nn.Module):
             tokens_per_block: Tensor of shape [B, T] with number of tokens per block.
             
         Returns:
-            mask: Binary mask of shape [B, T, max_tokens_per_block], 1 for visible tokens and 0 for masked tokens, e.g., [1,1,1,0,0,0,0,0,0,0]
+            mask: Binary mask of shape [B, T, max_tokens_per_block], 1 for visible tokens and 0 for masked tokens, e.g., [0,0,0,1,1,1,1,1,1,1]
                   where max_tokens_per_block is the spatial dimension of tokens.
         """
         batch_size, num_blocks = tokens_per_block.shape
         max_tokens_per_block = max_tokens_per_video // num_blocks
-        
-        # Create mask of ones followed by zeros for each block
-        masks = []
-        for b in range(batch_size):
-            block_masks = []
-            for t in range(num_blocks):
-                num_tokens = min(tokens_per_block[b, t].item(), max_tokens_per_block)
-                block_mask = torch.zeros(max_tokens_per_block, device=tokens_per_block.device)
-                block_mask[:num_tokens] = 1.0
-                block_masks.append(block_mask)
-            masks.append(torch.stack(block_masks, dim=0))
-        
-        return torch.stack(masks, dim=0)
-    
-    def invert_mask_for_mha(self, mask: torch.Tensor) -> torch.Tensor:
-        """Invert the mask for MHA.
-        
-        Args:
-            mask: Binary mask of shape [B, T, max_tokens_per_block], 1 for visible tokens and 0 for masked tokens, e.g., [1,1,1,0,0,0,0,0,0,0]
-
-        Returns:
-            mask: Binary mask of shape [B, T, max_tokens_per_block], 0 for visible tokens and 1 for masked tokens, e.g., [0,0,0,1,1,1,1,1,1,1]
-        """
-        return (1 - mask).to(torch.bool)
+        # Clamp tokens_per_block to max_tokens_per_block
+        tokens_per_block = torch.clamp(tokens_per_block, max=max_tokens_per_block)
+        # Create indices tensor for each position in max_tokens_per_block
+        indices = torch.arange(max_tokens_per_block, device=tokens_per_block.device)
+        indices = indices.unsqueeze(0).unsqueeze(0).expand(batch_size, num_blocks, -1)
+        tokens_per_block = tokens_per_block.unsqueeze(-1)
+        # Create mask: [0,0,0,1,1,1,1,1,1,1]
+        mask = torch.where(indices < tokens_per_block, 
+                          torch.zeros_like(indices, dtype=torch.float), 
+                          torch.ones_like(indices, dtype=torch.float))
+        encoding_mask_1d = mask.reshape(batch_size, -1).to(torch.bool)
+        return encoding_mask_1d
 
 class AdaptiveDiscreteVideoTokenizer(nn.Module):
     """1D-adaptive discrete video tokenizer.
@@ -201,47 +189,6 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
         setattr(self.quantizer, "dtype", kwargs.get("dtype", torch.bfloat16))
         return super(AdaptiveDiscreteVideoTokenizer, self).to(*args, **kwargs)
     
-    def reshape_3d_to_1d(self, x: torch.Tensor) -> torch.Tensor:
-        """Reshape 3D tokens to 1D sequence.
-        
-        Args:
-            x: Tensor of shape [B, C, T, H, W]
-            
-        Returns:
-            Tensor of shape [B, C, T*H*W]
-        """
-        B, C, T, H, W = x.shape
-        return x.reshape(B, C, T*H*W)
-    
-    def reshape_1d_to_3d(self, x: torch.Tensor, T: int, H: int, W: int) -> torch.Tensor:
-        """Reshape 1D sequence back to 3D tokens.
-        
-        Args:
-            x: Tensor of shape [B, C, T*H*W]
-            T: Time dimension
-            H: Height dimension
-            W: Width dimension
-            
-        Returns:
-            Tensor of shape [B, C, T, H, W]
-        """
-        B, C, _ = x.shape
-        return x.reshape(B, C, T, H, W)
-    
-    def apply_mask(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        """Apply mask to the 1D sequence.
-        
-        Args:
-            x: Tensor of shape [B, C, L] where L is the sequence length
-            mask: Tensor of shape [B, L] with 1s for tokens to keep, 0s for tokens to mask
-            
-        Returns:
-            Masked tensor of shape [B, C, L]
-        """
-        # Expand mask to match dimensions
-        mask = mask.unsqueeze(1)  # [B, 1, L]
-        return x * mask
-    
     def encode(self, x: torch.Tensor, rate_scores: Optional[torch.Tensor] = None) -> Tuple[Dict[str, Any], torch.Tensor, torch.Tensor]:
         """Encode input video to discrete tokens.
         
@@ -261,20 +208,12 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
         # Store original 3D shape
         B, C, T, H, W = h.shape
         
-        # Reshape to 1D sequence
-        h_1d = self.reshape_3d_to_1d(h)
-        
         # Compute adaptive token allocation
         if self.training:
             tokens_per_block, mask = self.adaptive_tokenization.compute_token_allocation(h, rate_scores)
             encoding_mask_1d = mask.reshape(B, -1)  # Reshape to [B, T*H*W]
-            # Apply mask to 1D sequence
-            h_1d = self.apply_mask(h_1d, encoding_mask_1d)
         else:
             encoding_mask_1d = None
-        
-        # Reshape back to 3D for decoder
-        h = self.reshape_1d_to_3d(h_1d, T, H, W)
         
         # Quantize the 1D sequence
         quant_info, quant_codes, quant_loss = self.quantizer(h)
@@ -286,17 +225,13 @@ class AdaptiveDiscreteVideoTokenizer(nn.Module):
         
         Args:
             quant: Quantized tensor of shape [B, C, T, H, W]
-            encoding_mask_1d: Binary mask of shape [B, T*H*W], 1 for visible tokens and 0 for masked tokens, e.g., [[1,1,1,0,0,0,0,0,0,0]]
+            encoding_mask_1d: Binary mask of shape [B, T*H*W], 1 for masked tokens and 0 for visible tokens, e.g., [[0,0,0,1,1,1,1,1,1,1]]
             
         Returns:
             Reconstructed video
         """
         quant = self.post_quant_conv(quant)
-        if encoding_mask_1d is None:
-            mha_encoding_mask = None
-        else:
-            mha_encoding_mask = self.adaptive_tokenization.invert_mask_for_mha(encoding_mask_1d) # [[0,0,0,1,1,1,1,1,1,1]]
-        return self.decoder(quant, attention_mask=None, encoding_mask=mha_encoding_mask)
+        return self.decoder(quant, attention_mask=None, encoding_mask=encoding_mask_1d)
     
     def encoder_jit(self):
         return nn.Sequential(
