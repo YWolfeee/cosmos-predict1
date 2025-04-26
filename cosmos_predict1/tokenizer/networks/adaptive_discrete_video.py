@@ -73,7 +73,7 @@ class AdaptiveTokenizationModule(nn.Module):
         # Apply rate strategy to convert scores to allocation ratios of each block in each batch (sum over blocks of all batch is one)
         if self.rate_strategy == 'uniform':
             # Uniform random allocation
-            allocation_ratios = torch.rand(batch_size, num_blocks, device=x.device, dtype=x.dtype)
+            allocation_ratios = torch.rand(batch_size, num_blocks, device=x.device, dtype=x.dtype).clip(0.0625)
         elif self.rate_strategy == 'unibin':
             # Uniform binary allocation from predefined values
             bins = torch.tensor([0.0625, 0.125, 0.25, 0.5, 0.75, 1.0], 
