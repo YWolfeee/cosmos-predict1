@@ -1,6 +1,9 @@
 import random
 from functools import lru_cache, partial
 
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+
 import torch
 import torch.nn.functional as F
 
@@ -185,7 +188,7 @@ def test_mask(
 
 num_block = 4  # number of temporal blocks
 patch_block_size = 1024  # H*W
-latent_block_size = 256  # number of latent tokens for each temporal block
+latent_block_size = 1024  # number of latent tokens for each temporal block
 # Total sequence length is num_block * patch_block_size + num_block * latent_block_size
 
 
@@ -240,6 +243,67 @@ def our_attn_mask(b, h, q_idx, kv_idx):
 
     return mask
 
+def flex_attn_mask_stage2(num_blocks, num_latent_tokens, num_patch_tokens):
+    
+    def our_mask_mode(b, h, q_idx, kv_idx):
+        """
+        Attention mask for the following:
+        Latent-latent attention: Causal
+        Patch-patch attention: Block causal
+        Latent-patch attention: Null
+        Patch-latent attention: Block causal
+        where q, k, v are of format [patch_tokens] + [latent_tokens]
+        with len(patch_tokens) = num_block * patch_block_size
+        and len(latent_tokens) = num_block * latent_block_size
+        """
+        def is_from_latent_and_get_block_idx(idx):
+            """
+            First check if the index is from latent tokens.
+            Return the latent_block_index if from latent tokens,
+            otherwise return the patch_block_index.
+            """
+            is_from_latent = idx < num_latent_tokens * num_blocks
+            block_idx = torch.where(
+                is_from_latent,
+                idx // num_latent_tokens,
+                (idx - num_latent_tokens * num_blocks) // num_patch_tokens
+            )
+            return is_from_latent, block_idx
+        
+        q_is_from_latent, q_block_idx = is_from_latent_and_get_block_idx(q_idx)
+        kv_is_from_latent, kv_block_idx = is_from_latent_and_get_block_idx(kv_idx)
+
+        # latent-latent attention: fully causal
+        mask = torch.where(
+            q_is_from_latent & kv_is_from_latent,
+            q_idx >= kv_idx,
+            False,
+        )
+        # latent-patch attention: null
+        mask = torch.where(
+            q_is_from_latent & ~kv_is_from_latent,
+            False,
+            mask
+        )
+        # patch-patch attention: block causal
+        mask = torch.where(
+            ~q_is_from_latent & ~kv_is_from_latent,
+            q_block_idx >= kv_block_idx,
+            mask
+        )
+        # patch-latent attention: block causal
+        mask = torch.where(
+            ~q_is_from_latent & kv_is_from_latent,
+            q_block_idx >= kv_block_idx,
+            mask
+        )
+        return mask
+
+    return our_mask_mode
+
+def flex_causal_mask(b, h, q_idx, kv_idx):
+    return q_idx >= kv_idx
+
 
 # PREFIX_LENGTH = 2048
 # def prefix_lm_causal_mask(b, h, q_idx, kv_idx):
@@ -248,10 +312,19 @@ def our_attn_mask(b, h, q_idx, kv_idx):
 #     return prefix_mask | causal_mask
 
 test_mask(
-    mask_mod=our_attn_mask,
-    B=2,
-    H=16,
+    mask_mod=flex_causal_mask,
+    B=1,
+    H=8,
+    S=num_block * (latent_block_size),
+    D=16,
+    print_mask=True
+)
+
+test_mask(
+    mask_mod=flex_attn_mask_stage2(num_block, latent_block_size, patch_block_size),
+    B=1,
+    H=8,
     S=num_block * (patch_block_size + latent_block_size),
-    D=128,
+    D=16,
     print_mask=True
 )
