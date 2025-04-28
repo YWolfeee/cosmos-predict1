@@ -507,6 +507,10 @@ class DecoderViT(nn.Module):
         self.patch_proj = nn.Linear(self.config.hidden_size, patch_dims, bias=False)
         nn.init.normal_(self.patch_proj.weight, mean=0.0, std=self.config.initializer_range)
 
+
+        # parameters for masked tokens
+        self.mask_token = nn.Parameter(torch.randn(self.config.hidden_size) * self.config.initializer_range)
+
         # ---------- Causal Mask ----------
         if self.config.use_causal_decode_1d:
             self.register_buffer('causal_mask', torch.triu(torch.ones(self.config.max_sequence_length_1d, self.config.max_sequence_length_1d, dtype=torch.bool), diagonal=1))
@@ -517,7 +521,7 @@ class DecoderViT(nn.Module):
             assert self.all_blocks[0].use_1d_rotary, ValueError("When using concat_decode_2d, the first decoder layer should be using 1d embeddings.")
             self.pos_emb_1d = nn.Parameter(torch.randn(self.config.hidden_size) * self.config.initializer_range)
             self.pos_emb_2d = nn.Parameter(torch.randn(self.config.hidden_size) * self.config.initializer_range)
-            self.masked_token = nn.Parameter(torch.randn(self.config.max_sequence_length, self.config.max_sequence_length, self.config.hidden_size) * self.config.initializer_range)
+            self.init_2d_token = nn.Parameter(torch.randn(self.config.max_sequence_length, self.config.max_sequence_length, self.config.hidden_size) * self.config.initializer_range)
 
 
     def forward(
@@ -556,12 +560,14 @@ class DecoderViT(nn.Module):
         N = T * H * W
         x = x.reshape(B, C, -1)  # (B, C, T*H*W)
         x = x.permute(0, 2, 1)  # (B, T*H*W, C)
-        switch_2d = False
+
+        if encoding_mask is not None:
+            # mask out tokens directly without passing through the transformer
+            x = torch.where(encoding_mask[..., None], self.mask_token[None, None], x)
 
         # Get 1D Attention Mask (Stage 1)
         causal_mask_1d = self.causal_mask[:N, :N]
         applied_attention_mask_1d = causal_mask_1d if attention_mask is None else attention_mask | causal_mask_1d
-        applied_encoding_mask_1d = encoding_mask
 
         # Get 1D+2D Attention Mask (Stage 2)
         causal_mask_1d = self.causal_mask[:N, :N]
@@ -577,29 +583,24 @@ class DecoderViT(nn.Module):
         )
         applied_attention_mask_2d = torch.concat([up_mask, down_mask], 
                                                 dim = 0)
-        if encoding_mask is not None:
-            applied_encoding_mask_2d = torch.cat([encoding_mask, torch.zeros_like(encoding_mask)], dim=-1) # zero indicates all 2d concated tokens are visible for each 1d token
-        else:
-            applied_encoding_mask_2d = None
 
+
+        switch_2d = False   # One time used variable for concat_decode_2d
         for blk in self.all_blocks:
             # Add causal mask at 1d decoding stage
             if self.config.use_causal_decode_1d and blk.use_1d_rotary:
                 applied_attention_mask = applied_attention_mask_1d
-                applied_encoding_mask = applied_encoding_mask_1d
             # Expanding encoding mask and attention mask to adapt to [x_1d, x_2d] rather than x_1d
             elif self.config.concat_decode_2d and not blk.use_1d_rotary:
                 applied_attention_mask = applied_attention_mask_2d
-                applied_encoding_mask = applied_encoding_mask_2d
             # Otherwise, keep original attention mask and encoding mask
             else:
                 applied_attention_mask = attention_mask
-                applied_encoding_mask = encoding_mask
             
             # Switch from 1d to 2d by concatenating tokens, only applicable at first 2d block
             if self.config.concat_decode_2d and not blk.use_1d_rotary and not switch_2d: # the first 2d block
                 x_1d = x + self.pos_emb_1d # x_1d can be adaptive in the future
-                x_2d = self.masked_token[:H, :W].reshape(H*W, -1)
+                x_2d = self.init_2d_token[:H, :W].reshape(H*W, -1)
                 x_2d = x_2d[None, None].repeat(B, T, 1, 1) + self.pos_emb_2d
                 x_2d = (x_2d + self.temporal_embed[None, :T, None]).view(B, T*H*W, -1)
                 x = torch.cat([x_1d, x_2d], dim=1)
@@ -607,7 +608,7 @@ class DecoderViT(nn.Module):
 
             x = blk(
                 x,
-                encoding_mask=applied_encoding_mask,
+                encoding_mask=None, # encoding mask is already applied on x
                 attention_mask=applied_attention_mask,
                 position_ids=(T, H, W),
                 cache=cache
