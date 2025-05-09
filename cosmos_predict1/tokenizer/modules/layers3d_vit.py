@@ -22,15 +22,13 @@ Adapted from: https://github.com/lucidrains/magvit2-pytorch/blob/
 https://github.com/lucidrains/magvit2-pytorch/blob/
 9f49074179c912736e617d61b32be367eb5f993a/LICENSE
 """
-from typing import Tuple, Optional, Dict, Any
+import math
+from typing import Tuple, Union, Optional, Dict, Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.attention.flex_attention import (
-    create_block_mask,
-    flex_attention,
-)
 from einops import rearrange
 
 from cosmos_predict1.tokenizer.modules.patching import Patcher3DArbitrary, UnPatcher3DArbitrary
@@ -176,41 +174,18 @@ def apply_rotary_emb(q: torch.Tensor, k: torch.Tensor, freqs_cis: torch.Tensor) 
 # Attention with RoPE
 # ------------------------------------------------------
 
-class FlexAttention(nn.Module):
-    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
-        super().__init__()
-        self.num_heads = num_heads
-        head_dim = dim // num_heads
-        self.scale = qk_scale or head_dim ** -0.5
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
-        self.proj_drop = nn.Dropout(proj_drop)
-
-    def forward(self, q, k, v, attn_mask):
-        q = rearrange(q, "B L (H D) -> B H L D", H=self.num_heads)
-        k = rearrange(k, "B L (H D) -> B H L D", H=self.num_heads)
-        v = rearrange(v, "B L (H D) -> B H L D", H=self.num_heads)
-        if self.training:
-            x = flex_attention(q, k, v, block_mask=attn_mask)
-        else:
-            x = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
-        x = rearrange(x, 'B H L D -> B L (H D)')
-
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        return x
-
 class RotaryMultiheadAttention(nn.Module):
-    def __init__(self, config: Dict, use_1d_rotary: bool = False):
+    def __init__(self, config: Dict, use_1d_rotary: bool = False, type: str = None):
         super().__init__()
         self.config = config
         embed_dim = config.hidden_size
         num_heads = config.num_attention_heads
         self.head_dim = embed_dim // num_heads
 
-        self.attention = FlexAttention(embed_dim, num_heads)
+        self.mha = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
         self.use_1d_rotary = use_1d_rotary
+        self.special_attn = config.special_attn
+        self.type = type
 
         if self.use_1d_rotary or self.config.concat_decode_2d: # If not use_1d_rotary but concat, freqs_cis is required as well
             # Build a buffer for rotary
@@ -229,8 +204,9 @@ class RotaryMultiheadAttention(nn.Module):
             )
 
         # Initialize parameters as in the JAX code
-        nn.init.normal_(self.attention.qkv.weight, mean=0.0, std=config.initializer_range)
-        nn.init.normal_(self.attention.proj.weight, mean=0.0, std=config.initializer_range)
+        nn.init.normal_(self.mha.in_proj_weight, mean=0.0, std=config.initializer_range)
+        nn.init.zeros_(self.mha.in_proj_bias)
+        nn.init.normal_(self.mha.out_proj.weight, mean=0.0, std=config.initializer_range)
 
     def forward(
         self, 
@@ -249,12 +225,17 @@ class RotaryMultiheadAttention(nn.Module):
         """
         B, S, E = hidden_states.shape
 
+        # MHA does Q/K/V creation inside. We'll do it manually so we can do rotary on Q/K
+        # Extract the projection parameters
+        in_proj_weight = self.mha.in_proj_weight
+        in_proj_bias = self.mha.in_proj_bias
+
         # Project Q, K, V in one go
-        qkv = self.attention.qkv(hidden_states)
+        qkv = F.linear(hidden_states, in_proj_weight, in_proj_bias)
         q, k, v = qkv.chunk(3, dim=-1)  # each [B, S, E]
 
         # Now reshape Q/K for rotary
-        n_heads = self.attention.num_heads
+        n_heads = self.mha.num_heads
         head_dim = E // n_heads
         T, H, W = position_ids
 
@@ -317,8 +298,23 @@ class RotaryMultiheadAttention(nn.Module):
         # if cache is not None:
         #   handle extending k, v, etc.
         #   omitted here for brevity
+        assert encoding_mask is None
 
-        out = self.attention(q, k, v, attn_mask=attention_mask)
+        if not self.special_attn:
+            out, _ = self.mha(
+                q, k, v,
+                attn_mask=attention_mask,
+                need_weights=False
+            )
+        else:
+            N1 = S - T*H*W
+            if self.type == 'encoder':
+                out = F.scaled_dot_product_attention(q, k, v)
+            elif self.type == 'decoder':
+                out0 = F.scaled_dot_product_attention(
+                    q[:,:N1], k[:,:N1], v[:,:N1], is_causal=True)
+                out1 = F.scaled_dot_product_attention(q[:,N1:], k, v)
+                out = torch.cat([out0, out1], dim=1)
         return out
     
 # ------------------------------------------------------------------
@@ -345,13 +341,13 @@ class MLP(nn.Module):
 # ------------------------------------------------------------------
 
 class TransformerBlock(nn.Module):
-    def __init__(self, config: Dict, layer_loc: float):
+    def __init__(self, config: Dict, layer_loc: float, type: str = None):
         super().__init__()
         self.attention_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.ffn_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         self.use_1d_rotary = config.switch_rotary_to_1d <= layer_loc # For accessment from DecoderViT
-        self.attention = RotaryMultiheadAttention(config, use_1d_rotary=self.use_1d_rotary)
+        self.attention = RotaryMultiheadAttention(config, use_1d_rotary=self.use_1d_rotary, type=type)
         self.mlp = MLP(config)
 
     def forward(
@@ -425,8 +421,6 @@ class EncoderViT(nn.Module):
         # ---------- Transformer Blocks ----------
         num_layers = getattr(self.config, 'num_encoder_layers')
         self.all_blocks = nn.ModuleList([TransformerBlock(self.config, layer_loc=i/num_layers) for i in range(num_layers)])
-        print("1D block across encoder:", [w.attention.use_1d_rotary for w in self.all_blocks])
-
         
         # ---------- Output Projection ----------
         # self.norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
@@ -514,8 +508,7 @@ class DecoderViT(nn.Module):
         # ---------- Transformer Blocks ----------
         num_layers = getattr(self.config, 'num_decoder_layers')
         self.all_blocks = nn.ModuleList([TransformerBlock(self.config, layer_loc=(num_layers - i - 1)/num_layers) for i in range(num_layers)])
-        print("1D block across decoder:", [w.attention.use_1d_rotary for w in self.all_blocks])
-        
+
         # ---------- Output Projection ----------
         patch_dims = out_channels * self.temporal_compression * (self.spatial_compression ** 2)
         self.patch_norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
@@ -523,9 +516,12 @@ class DecoderViT(nn.Module):
         self.patch_proj = nn.Linear(self.config.hidden_size, patch_dims, bias=False)
         nn.init.normal_(self.patch_proj.weight, mean=0.0, std=self.config.initializer_range)
 
-
         # parameters for masked tokens
         self.mask_token = nn.Parameter(torch.randn(self.config.hidden_size) * self.config.initializer_range)
+
+        # ---------- Causal Mask ----------
+        if self.config.use_causal_decode_1d:
+            self.register_buffer('causal_mask', torch.triu(torch.ones(self.config.max_sequence_length_1d, self.config.max_sequence_length_1d, dtype=torch.bool), diagonal=1))
 
         # ---------- 2D Decoding ----------
         if self.config.concat_decode_2d:
@@ -577,16 +573,29 @@ class DecoderViT(nn.Module):
             # mask out tokens directly without passing through the transformer
             x = torch.where(encoding_mask[..., None], self.mask_token[None, None], x)
 
-        if self.training:
-            applied_attention_mask_1d = create_block_mask(flex_attn_mask_stage1_callback(), 1, 1, N, N, device=x.device)
-            applied_attention_mask_2d = create_block_mask(flex_attn_mask_stage2_callback(T, H*W, H*W), 1, 1, N * 2, N * 2, device=x.device)
-        else:
-            applied_attention_mask_1d = build_attn_mask_stage1(T, H, W).to(dtype=torch.bool, device=x.device)
-            applied_attention_mask_2d = build_attn_mask_stage2(T, H, W).to(dtype=torch.bool, device=x.device)
-        
+        # Get 1D Attention Mask (Stage 1)
+        if self.config.use_causal_decode_1d:
+            applied_attention_mask_1d = self.causal_mask[:N, :N]
+
+        # Get 1D+2D Attention Mask (Stage 2)
+        if self.config.concat_decode_2d:
+            causal_mask_1d = self.causal_mask[:N, :N]
+            up_mask = torch.concat(
+                [causal_mask_1d, torch.ones_like(causal_mask_1d)],
+                dim = 1
+            )
+            # concat two block_causal_mask twice over the second dims
+            block_causal_mask = build_block_causal_mask(T, H, W).to(x.device)
+            down_mask = torch.concat(
+                [block_causal_mask, block_causal_mask],
+                dim = 1
+            )
+            # print(N, T, H, W, up_mask.shape, down_mask.shape)
+            applied_attention_mask_2d = torch.concat([up_mask, down_mask], 
+                                                    dim = 0)
+
+
         switch_2d = False   # One time used variable for concat_decode_2d
-
-
         for blk in self.all_blocks:
             # Add causal mask at 1d decoding stage
             if self.config.use_causal_decode_1d and blk.use_1d_rotary:
@@ -623,97 +632,9 @@ class DecoderViT(nn.Module):
         x = x.permute(0, 2, 1)  # (B, D, T*H*W)
         x = x.reshape(B, -1, T, H, W)  # (B, D, T, H, W)
         x = self.unpatcher(x)  # (B, D', T', H', W')
-
+            
         return x
-
-def flex_attn_mask_stage1_callback():
-    """
-    Simple causal mask.
-    """
-    def flex_attn_mask_stage1(b, h, q_idx, kv_idx):
-        return q_idx >= kv_idx
     
-    return flex_attn_mask_stage1
-
-def flex_attn_mask_stage2_callback(num_blocks, num_latent_tokens, num_patch_tokens):
-    
-    def flex_attn_mask_stage2(b, h, q_idx, kv_idx):
-        """
-        Attention mask for the following:
-        Latent-latent attention: Causal
-        Patch-patch attention: Block causal
-        Latent-patch attention: Null
-        Patch-latent attention: Block causal
-        where q, k, v are of format [patch_tokens] + [latent_tokens]
-        with len(patch_tokens) = num_block * patch_block_size
-        and len(latent_tokens) = num_block * latent_block_size
-        """
-        def is_from_latent_and_get_block_idx(idx):
-            """
-            First check if the index is from latent tokens.
-            Return the latent_block_index if from latent tokens,
-            otherwise return the patch_block_index.
-            """
-            is_from_latent = idx < num_latent_tokens
-            block_idx = torch.where(
-                is_from_latent,
-                idx // num_latent_tokens,
-                (idx - num_latent_tokens * num_blocks) // num_patch_tokens
-            )
-            return is_from_latent, block_idx
-        
-        q_is_from_latent, q_block_idx = is_from_latent_and_get_block_idx(q_idx)
-        kv_is_from_latent, kv_block_idx = is_from_latent_and_get_block_idx(kv_idx)
-
-        # latent-latent attention: fully causal
-        mask = torch.where(
-            q_is_from_latent & kv_is_from_latent,
-            q_idx >= kv_idx,
-            False,
-        )
-        # latent-patch attention: null
-        mask = torch.where(
-            q_is_from_latent & ~kv_is_from_latent,
-            False,
-            mask
-        )
-        # patch-patch attention: block causal
-        mask = torch.where(
-            ~q_is_from_latent & ~kv_is_from_latent,
-            q_block_idx >= kv_block_idx,
-            mask
-        )
-        # patch-latent attention: block causal
-        mask = torch.where(
-            ~q_is_from_latent & kv_is_from_latent,
-            q_block_idx >= kv_block_idx,
-            mask
-        )
-        return mask
-
-    return flex_attn_mask_stage2
-
-def build_attn_mask_stage1(T, H, W):
-    total_latent_tokens = T * H * W
-    return torch.triu(torch.ones(total_latent_tokens, total_latent_tokens, dtype=torch.bool), diagonal=1)
-
-def build_attn_mask_stage2(T, H, W):
-    total_latent_tokens = T * H * W
-    causal_mask_1d = torch.triu(torch.ones(total_latent_tokens, total_latent_tokens, dtype=torch.bool), diagonal=1)
-    up_mask = torch.concat(
-        [causal_mask_1d, torch.ones_like(causal_mask_1d)],
-        dim = 1
-    )
-    # concat two block_causal_mask twice over the second dims
-    block_causal_mask = build_block_causal_mask(T, H, W)
-    down_mask = torch.concat(
-        [block_causal_mask, block_causal_mask],
-        dim = 1
-    )
-    applied_attention_mask_2d = torch.concat([up_mask, down_mask], 
-                                            dim = 0)
-    return applied_attention_mask_2d
-
 def build_block_causal_mask(T: int, H: int, W: int) -> torch.Tensor:
     """
     Constructs a block causal attention mask for a sequence of T blocks,

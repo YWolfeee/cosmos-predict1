@@ -9,10 +9,10 @@ from cosmos_predict1.tokenizer.modules import (
     EncoderType,
 )
 
-from cosmos_predict1.tokenizer.networks.adaptive_discrete_video import AdaptiveDiscreteVideoTokenizer
+from cosmos_predict1.tokenizer.networks.ours_discrete_video import OursDiscreteVideoTokenizer
 
 
-AdaptiveDiscreteVideoTokenizerConfig: LazyDict = L(AdaptiveDiscreteVideoTokenizer)(
+OursDiscreteVideoTokenizerConfig: LazyDict = L(OursDiscreteVideoTokenizer)(
     # The adaptive discrete tokenizer that supports variable-length token sequences
     # - Uses 1D token sequences by flattening 3D tokens
     # - Adaptive token allocation based on rate scores
@@ -45,5 +45,5 @@ AdaptiveDiscreteVideoTokenizerConfig: LazyDict = L(AdaptiveDiscreteVideoTokenize
     levels=[8, 8, 8, 5, 5, 5],
     encoder=Encoder3DType.ViT.name,
     decoder=Decoder3DType.ViT.name,
-    name="AdaptiveDiscreteVideoTokenizer",
+    name="OursDiscreteVideoTokenizer",
 )

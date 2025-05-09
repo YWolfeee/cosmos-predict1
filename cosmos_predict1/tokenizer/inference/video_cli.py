@@ -40,6 +40,7 @@ from typing import Any
 
 import numpy as np
 from loguru import logger as logging
+from tqdm import tqdm
 
 from cosmos_predict1.tokenizer.inference.utils import (
     get_filepaths,
@@ -87,6 +88,10 @@ def _parse_args() -> tuple[Namespace, dict[str, Any]]:
             "DV8x16x16-720p",
             "CV4x8x8-360p",
             "DV4x8x8-360p",
+            "OURS4x8x8-256p",
+            "OURS4x8x8-256p-88",
+            "OURS4x8x8-concat-256p-88",
+            "OURS4x8x8-special-256p-88",
         ],
         help="Specifies the tokenizer type.",
     )
@@ -121,6 +126,18 @@ def _parse_args() -> tuple[Namespace, dict[str, Any]]:
         default="cuda",
         help="Device for invoking the model.",
     )
+    parser.add_argument(
+        "--strategy",
+        type=str,
+        default="static",
+        help="Strategy for invoking the model.",
+    )
+    parser.add_argument(
+        "--avg_rate",
+        type=float,
+        default=0.5,
+        help="Average rate for invoking the model.",
+    )
     parser.add_argument("--output_dir", type=str, default=None, help="Output directory.")
     parser.add_argument(
         "--output_fps",
@@ -132,6 +149,16 @@ def _parse_args() -> tuple[Namespace, dict[str, Any]]:
         "--save_input",
         action="store_true",
         help="If on, the input video will be be outputted too.",
+    )
+    parser.add_argument(
+        "--save_clip",
+        action="store_true",
+        help="If on, the input video will be be outputted too.",
+    )
+    parser.add_argument(
+        "--only_square_clips",
+        action="store_true",
+        help="If on, only square clips will be saved.",
     )
     args = parser.parse_args()
     return args
@@ -173,6 +200,44 @@ def _run_eval() -> None:
     filepaths = get_filepaths(args.video_pattern)
     logging.info(f"Found {len(filepaths)} videos from {args.video_pattern}.")
 
+    print("Tokenizer Type: ", args.tokenizer_type)
+
+    if args.save_clip:
+        for filepath in filepaths:
+            logging.info(f"Reading video {filepath} ...")
+            video = read_video(filepath)
+            output_filepath = get_output_filepath(filepath, output_dir=args.output_dir)
+            video = resize_video(video, short_size=args.short_size)
+            logging.info("Splitting video into clips ...")
+            num_frames = video.shape[0]
+            print("num_frames: ", num_frames)
+            print("video.shape: ", video.shape)
+            temporal_window = args.temporal_window
+            for idx in tqdm(range(0, (num_frames - 1) // temporal_window + 1)):
+                # Input video for the current window.
+                start, end = idx * temporal_window, (idx + 1) * temporal_window
+                video_clip = video[start:end, ...]
+                print("video_clip.shape: ", video_clip.shape)
+                if args.only_square_clips:
+                    if video_clip.shape[1] == video_clip.shape[2]: # only save square clips
+                        clip_file_path = output_filepath.replace(".mp4", f"_{idx}.mp4")
+                        write_video(clip_file_path, video_clip, fps=args.output_fps)
+                else:
+                    clip_file_path = output_filepath.replace(".mp4", f"_{idx}.mp4")
+                    write_video(clip_file_path, video_clip, fps=args.output_fps)
+        return
+
+    if "global_elbo" in args.strategy:
+        for filepath in filepaths:
+            logging.info(f"Reading video {filepath} ...")
+            video = read_video(filepath)
+            video = resize_video(video, short_size=args.short_size)
+
+            logging.info("Invoking the autoencoder model in ... ")
+            batch_video = video[np.newaxis, ...]
+            _ = autoencoder(batch_video, temporal_window=args.temporal_window, strategy=args.strategy, avg_rate=args.avg_rate, collect_elbo_only=True)
+
+    token_rates = []
     for filepath in filepaths:
         logging.info(f"Reading video {filepath} ...")
         video = read_video(filepath)
@@ -180,7 +245,10 @@ def _run_eval() -> None:
 
         logging.info("Invoking the autoencoder model in ... ")
         batch_video = video[np.newaxis, ...]
-        output_video = autoencoder(batch_video, temporal_window=args.temporal_window)[0]
+        output_video, token_rate = autoencoder(batch_video, temporal_window=args.temporal_window, strategy=args.strategy, avg_rate=args.avg_rate)
+        output_video = output_video[0]
+        token_rates.append([os.path.basename(filepath), token_rate])
+        
         logging.info("Constructing output filepath ...")
         output_filepath = get_output_filepath(filepath, output_dir=args.output_dir)
         logging.info(f"Outputing {output_filepath} ...")
@@ -189,6 +257,13 @@ def _run_eval() -> None:
             ext = os.path.splitext(output_filepath)[-1]
             input_filepath = output_filepath.replace(ext, "_input" + ext)
             write_video(input_filepath, video, fps=args.output_fps)
+    
+    # Save token rates to CSV
+    token_rate_filepath = os.path.join(args.output_dir, "token_rate.csv")
+    os.makedirs(os.path.dirname(token_rate_filepath), exist_ok=True)
+    with open(token_rate_filepath, 'w') as f:
+        f.write(str(token_rates))
+    logging.info(f"Token rates saved to {token_rate_filepath}")
 
 
 @logging.catch(reraise=True)

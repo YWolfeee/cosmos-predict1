@@ -47,7 +47,8 @@ def load_model(
     if tokenizer_config is None:
         return load_jit_model(jit_filepath, device)
     full_model, ckpts = _load_pytorch_model(jit_filepath, tokenizer_config, device)
-    full_model.load_state_dict(ckpts.state_dict(), strict=True)
+    # full_model.load_state_dict(ckpts, strict=True)
+    full_model.load_state_dict(ckpts, strict=False) # some register buffer is not saved
     return full_model.eval().to(device)
 
 
@@ -106,7 +107,12 @@ def _load_pytorch_model(
     """
     tokenizer_name = tokenizer_config["name"]
     model = TokenizerModels[tokenizer_name].value(**tokenizer_config)
-    ckpts = torch.jit.load(jit_filepath, map_location=device)
+    print(f"Loading model from {jit_filepath}")
+    ckpts = torch.load(jit_filepath, weights_only=False, map_location=device)
+    if "model" in ckpts: # Original setting, the ckpts might include optimizer and other stuff
+        ckpts = ckpts["model"]
+    # Filter parameters to only include those with keys starting with "network." and remove the prefix
+    ckpts = {k.replace("network.", ""): v for k, v in ckpts.items() if k.startswith("network.")}
     return model, ckpts
 
 

@@ -33,7 +33,7 @@ from cosmos_predict1.tokenizer.networks.continuous_image import ContinuousImageT
 from cosmos_predict1.tokenizer.networks.continuous_video import CausalContinuousVideoTokenizer
 from cosmos_predict1.tokenizer.networks.discrete_image import DiscreteImageTokenizer
 from cosmos_predict1.tokenizer.networks.discrete_video import CausalDiscreteVideoTokenizer
-from cosmos_predict1.tokenizer.networks.adaptive_discrete_video import AdaptiveDiscreteVideoTokenizer
+from cosmos_predict1.tokenizer.networks.ours_discrete_video import AdaptiveDiscreteVideoTokenizer
 from cosmos_predict1.utils.lazy_config import LazyCall as L
 from cosmos_predict1.utils.lazy_config import LazyDict
 

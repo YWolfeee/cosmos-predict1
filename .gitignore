@@ -6,3 +6,6 @@ apex/
 Video_Tokenization.ipynb
 *.e*
 *.o*
+
+TokenBench/pretrained_ckpts
+cosmos_predict1/tokenizer/inference/TokenBench.code-workspace
