@@ -18,6 +18,7 @@ from collections import OrderedDict, namedtuple
 import torch
 from loguru import logger as logging
 from torch import nn
+from einops import rearrange
 
 from cosmos_predict1.tokenizer.modules import Decoder3DType, DiscreteQuantizer, Encoder3DType
 from cosmos_predict1.tokenizer.modules.layers3d import CausalConv3d
@@ -56,6 +57,7 @@ class OursDiscreteVideoTokenizer(nn.Module):
             assert "levels" in kwargs, f"`levels` must be provided for {quantizer_name}."
             assert "num_quantizers" in kwargs, f"`num_quantizers` must be provided for {quantizer_name}."
 
+        self.spatial_compression = kwargs.get("spatial_compression", 16)
         self.temporal_compression = kwargs.get("temporal_compression", 16)
 
         self.quantizer = DiscreteQuantizer[quantizer_name].value(**kwargs)
@@ -70,16 +72,10 @@ class OursDiscreteVideoTokenizer(nn.Module):
         self.rate_strategy = kwargs.get("rate_strategy", "static")
         self.use_vit = kwargs.get("use_vit", False)
         self.vit_config = kwargs.get("vit_config", None)
-        if isinstance(self.vit_config, dict):
-            # Convert dictionary to a class with attribute access
-            class DotDict:
-                def __init__(self, dictionary):
-                    for key, value in dictionary.items():
-                        if isinstance(value, dict):
-                            value = DotDict(value)
-                        setattr(self, key, value)
-            
-            self.vit_config = DotDict(self.vit_config)
+        # Convert vit_config dictionary to an object with attribute access
+        if self.vit_config is not None and isinstance(self.vit_config, dict):
+            from types import SimpleNamespace
+            self.vit_config = SimpleNamespace(**self.vit_config)
         if self.use_vit:
             self.freeze_original = kwargs.get("freeze_original", True)
             if self.freeze_original:
@@ -91,6 +87,15 @@ class OursDiscreteVideoTokenizer(nn.Module):
                 logging.info("Not freezing original model parameters.")
 
             assert self.vit_config is not None, "vit_config must be provided if use_vit is True"
+            if self.vit_config.hidden_size != z_channels:
+                self.vit_conv = nn.Linear(z_channels, self.vit_config.hidden_size, bias=False)
+                nn.init.normal_(self.vit_conv.weight, mean=0.0, std=self.vit_config.initializer_range)
+                self.post_vit_conv = nn.Linear(self.vit_config.hidden_size, z_channels, bias=False)
+                nn.init.normal_(self.post_vit_conv.weight, mean=0.0, std=self.vit_config.initializer_range)
+
+            else:
+                self.vit_conv = nn.Identity()
+                self.post_vit_conv = nn.Identity()
             num_encoder_layers = self.vit_config.num_encoder_layers
             self.vit_encoder = nn.ModuleList([TransformerBlock(self.vit_config, layer_loc=i/num_encoder_layers, type='encoder') for i in range(num_encoder_layers)])
             num_decoder_layers = self.vit_config.num_decoder_layers
@@ -106,10 +111,9 @@ class OursDiscreteVideoTokenizer(nn.Module):
                 self.pos_emb_2d = nn.Parameter(torch.randn(self.vit_config.hidden_size) * self.vit_config.initializer_range)
                 self.init_2d_token = nn.Parameter(torch.randn(self.vit_config.max_sequence_length, self.vit_config.max_sequence_length, self.vit_config.hidden_size) * self.vit_config.initializer_range)
 
-            self.compression_rate = 1
             self.special_attn = self.vit_config.special_attn
+            self.method = self.vit_config.method
             if self.special_attn:
-                self.compression_rate = 1.0
                 self.full_latent_tokens = nn.Parameter(torch.empty(self.vit_config.max_sequence_length_1d * self.vit_config.max_num_video_frames, self.vit_config.hidden_size))
                 nn.init.normal_(self.full_latent_tokens, mean=0.0, std=self.vit_config.initializer_range)
                 print(f"full_latent_tokens: {self.full_latent_tokens.shape}")
@@ -173,7 +177,88 @@ class OursDiscreteVideoTokenizer(nn.Module):
         self.save_loss = torch.roll(self.save_loss, 1, dims=0)
         self.save_loss[0] = loss.mean().item()
 
-    def adaptive_tokenize(self, z, use_adaptive=True, chunk_loss=None, manual_rate_idx: int = None, mask_seq: bool = False):
+    def get_allocated_ratios(self, token_shape, use_adaptive=True, chunk_loss=None, manual_base_rate: float=None, mask_seq: bool = False, overwrite_strategy: str = None, rescale: bool = False):
+        """
+        Get the allocated ratios for each block.
+        Returns:
+            torch.Tensor: The allocated ratios for each block.
+        """
+        batch_size, d, num_blocks, h, w = token_shape
+        if not use_adaptive:
+            return torch.ones((batch_size, num_blocks))
+        strategy = overwrite_strategy if overwrite_strategy is not None else self.rate_strategy
+
+        # base_rate has size (B,)
+        base_rate = torch.tensor([1.0, 0.75, 0.5, 0.25])[torch.randint(0, 4, (batch_size,))]
+        if manual_base_rate is not None:
+            print(f"manual_base_rate: {manual_base_rate}")
+            base_rate = torch.ones((batch_size,)) * manual_base_rate
+
+        if rescale:
+            assert chunk_loss is not None, "chunk_loss must be provided for rescaling"
+            base_rate = self.rescale_and_push(chunk_loss.mean(dim=(-1,-2,-3)), 
+                                              base_rate)
+
+        if mask_seq:
+            return base_rate[:, None]
+
+        if strategy == 'static':
+            allocation_ratios = torch.ones((batch_size, num_blocks,)) * base_rate[:, None]
+        elif strategy == 'uniform':
+            rate = torch.rand(batch_size, num_blocks).clip(0.0625)
+            rate = rate / rate.mean(dim=-1)
+            allocation_ratios = (rate * base_rate[:, None])
+        elif 'elbo' in strategy:
+            assert chunk_loss is not None, "chunk_loss must be provided for ELBO rate strategy"
+            block_loss = chunk_loss.mean(dim=(-1,-2))   # (B, T)
+            base_rate = base_rate.to(block_loss.device, block_loss.dtype)
+            weight = block_loss / block_loss.mean(dim=-1, keepdim=True) - 1
+            max_ratio = weight.max(dim=-1, keepdim=True)[0] + 1e-5
+            scale_ratio = min(max_ratio, 1 / base_rate[:, None] - 1) / max_ratio
+
+            allocation_ratios = (1 + weight * scale_ratio) * base_rate[:, None]
+
+        return allocation_ratios.clip(0.0625, 1.0)
+    
+    def mask_tokens(self, z, mask_rate: torch.Tensor, mask_method: str='order', chunk_loss=None):
+        """
+        Mask the tokens based on the mask rate and method.
+        Args:
+            z (torch.Tensor): The input tensor.
+            mask_rate (torch.Tensor): The mask rate tensor.
+            mask_method (str): The mask method. Can be 'order' or 'mse'.
+        Returns:
+            torch.Tensor: The masked tensor.
+        """
+        batch_size, d, _, h, w = z.shape
+        mask_rate = mask_rate.reshape(batch_size, 1, -1).to(z.device)
+        t = mask_rate.shape[-1]
+        z = z.reshape(batch_size, d, t, -1)
+        N = z.shape[-1]
+
+        if mask_method == 'mse':
+            assert chunk_loss is not None, "chunk_loss must be provided for mse method"
+            assert t == 1, "mask_seq should be 1 for mse method"
+            mse_loss = chunk_loss.reshape(batch_size, 1, t, -1) # chunk_loss: (B, D, 1, T*H*W), the masking is operating on the whole clip
+            mse_bound = torch.quantile(mse_loss.float(), (1 - mask_rate).item(), dim=-1, keepdim=True)
+            adaptive_mask = torch.where(mse_loss > mse_bound, 1.0, 0.0).to(torch.bool).detach()
+        elif 'order' in mask_method:
+            indices = torch.arange(N, device=mask_rate.device)
+            indices = indices[None, None, None].expand(*z.shape) # z.shape: [B, D, T, H*W], indices.shape: [1, 1, 1, H*W]
+            mask_rate = mask_rate.unsqueeze(-1) # [B, 1, T] -> [B, 1, T, 1]
+            adaptive_mask = torch.where(indices > mask_rate * N, 0.0, 1.0).to(torch.bool).detach()
+
+            if mask_method.startswith("order_"):
+                spliter = int(mask_method.split("_")[1])
+                adaptive_mask = adaptive_mask.reshape(batch_size, d, t, spliter, -1).permute(0, 1, 2, 4, 3)
+                adaptive_mask = adaptive_mask.reshape(batch_size, d, t, -1)
+        
+        z = torch.where(adaptive_mask, z, torch.zeros_like(z))
+        return z.reshape(batch_size, d, -1, h, w), adaptive_mask
+    
+    def adaptive_tokenize(self, z, use_adaptive=True, chunk_loss=None, manual_rate_idx: int = None, mask_seq: bool = False, method: str = 'order'):
+        if method == 'mse':
+            mask_seq = True
         batch_size, d, num_blocks, h, w = z.shape
         max_tokens_per_block = h * w
         if mask_seq:
@@ -202,7 +287,7 @@ class OursDiscreteVideoTokenizer(nn.Module):
         elif self.rate_strategy == 'elbo':
             assert chunk_loss is not None, "chunk_loss must be provided for ELBO rate strategy"
             # ELBO rate allocation
-            bins = torch.tensor([1.0, 0.75, 0.5, 0.25, 0.125], 
+            bins = torch.tensor([1.0, 0.75, 0.5, 0.25], 
                                           device=z.device, dtype=z.dtype)
             indices = torch.randint(0, len(bins), 
                                    (batch_size,), 
@@ -210,8 +295,8 @@ class OursDiscreteVideoTokenizer(nn.Module):
             allocation_ratios = bins[indices][..., None]
             if manual_rate is not None:
                 allocation_ratios = torch.ones_like(allocation_ratios) * manual_rate
-
-            weight = chunk_loss / chunk_loss.mean(dim=-1, keepdim=True) - 1
+            block_loss = chunk_loss.mean(dim=(-1,-2))
+            weight = block_loss / block_loss.mean(dim=-1, keepdim=True) - 1
             max_ratio = weight.max(dim=-1, keepdim=True)[0] + 1e-5
             scale_ratio = min(max_ratio, 1 / allocation_ratios - 1) / max_ratio
             # print(allocation_ratios.shape, weight.shape, scale_ratio.shape, allocation_ratios, weight)
@@ -223,16 +308,20 @@ class OursDiscreteVideoTokenizer(nn.Module):
             allocation_ratios = torch.ones(batch_size, num_blocks, device=z.device, dtype=z.dtype)
             if manual_rate is not None:
                 allocation_ratios = torch.ones_like(allocation_ratios) * manual_rate
-        elif self.rate_strategy == 'elboema':
+        elif 'elboema' in self.rate_strategy:
             assert mask_seq and chunk_loss is not None
             bins = torch.tensor([1.0, 0.75, 0.5, 0.25, 0.125], device=z.device)
+            if '4' in self.rate_strategy:
+                bins = bins[:-1]    # remove 0.125 for the sake
             indices = torch.randint(0, len(bins), (batch_size,), device=z.device)
             allocation_ratios = bins[indices][..., None]
             
-            loss = chunk_loss.mean(dim=-1)
+            loss = chunk_loss.mean(dim=(-1,-2,-3))
             self.push_signal(loss)
             allocation_ratios = allocation_ratios * (loss / self.ema_loss)
             allocation_ratios = allocation_ratios.clip(0.0625, 1.0)
+            if 'safe' in self.rate_strategy:
+                allocation_ratios = torch.where(indices == 0, 1.0, allocation_ratios)
             if torch.rand(1).item() < 0.01:
                 logging.info(f"avg loss: {self.save_loss.mean():2f}, ema loss: {self.ema_loss.item():2f}, loss:{loss.mean().item():2f}, alloc_rate: {allocation_ratios.mean():2f}.")
 
@@ -242,17 +331,30 @@ class OursDiscreteVideoTokenizer(nn.Module):
         else:
             raise ValueError(f"Unknown rate strategy: {self.rate_strategy}")
         
-        tokens_per_block = (allocation_ratios * max_tokens_per_block).int()
-        # Clamp tokens_per_block to max_tokens_per_block
-        # Create indices tensor for each position in max_tokens_per_block
-        indices = torch.arange(max_tokens_per_block, device=tokens_per_block.device)
-        indices = indices.unsqueeze(0).unsqueeze(0).expand(batch_size, num_blocks, -1)
-        tokens_per_block = tokens_per_block.unsqueeze(-1)
-        # Create mask: [1,1,1,0,0,0,0,0,0,0]
-        adaptive_mask = torch.where(indices > tokens_per_block, 
-                          torch.zeros_like(indices, dtype=torch.float), 
-                          torch.ones_like(indices, dtype=torch.float))
-        adaptive_mask = adaptive_mask.reshape(batch_size, 1, num_blocks, -1).to(torch.bool).detach()
+        if 'order' in method:
+            tokens_per_block = (allocation_ratios * max_tokens_per_block).int()
+            # Clamp tokens_per_block to max_tokens_per_block
+            # Create indices tensor for each position in max_tokens_per_block
+            indices = torch.arange(max_tokens_per_block, device=tokens_per_block.device)
+            indices = indices.unsqueeze(0).unsqueeze(0).expand(batch_size, num_blocks, -1)
+            tokens_per_block = tokens_per_block.unsqueeze(-1)
+            # Create mask: [1,1,1,0,0,0,0,0,0,0]
+            adaptive_mask = torch.where(indices > tokens_per_block, 
+                            torch.zeros_like(indices, dtype=torch.float), 
+                            torch.ones_like(indices, dtype=torch.float))
+            adaptive_mask = adaptive_mask.reshape(batch_size, 1, num_blocks, -1).to(torch.bool).detach()
+            if method.startswith("order_"):
+                spliter = int(method.split("_")[1])
+                adaptive_mask = adaptive_mask.reshape(batch_size, 1, num_blocks, spliter, -1).permute(0, 1, 2, 4, 3)
+                adaptive_mask = adaptive_mask.reshape(batch_size, 1, num_blocks, -1)
+                print(adaptive_mask[0,0,0].reshape(h, w))
+        elif method == 'mse':
+            # assert mask_seq, "mask_seq must be True for mse method"
+            mse_loss = chunk_loss.reshape(batch_size, -1)
+            mse_bound = torch.quantile(mse_loss.float(), (1 - allocation_ratios).item(), dim=-1, keepdim=True)
+            adaptive_mask = torch.where(mse_loss > mse_bound, 1.0, 0.0)
+            adaptive_mask = adaptive_mask.reshape(batch_size, 1, num_blocks, -1).to(torch.bool).detach()
+            # print(adaptive_mask.shape, adaptive_mask.float().mean(dim = -1))
         
         z = z.reshape(batch_size, d, num_blocks, -1) * adaptive_mask
         return z.reshape(batch_size, d, -1, h, w), allocation_ratios
@@ -279,6 +381,7 @@ class OursDiscreteVideoTokenizer(nn.Module):
         return block_causal_mask.to(torch.bool)
     
     def vit_encode(self, z):
+        z = self.vit_conv(z.permute(0, 2, 3, 4, 1)).permute(0, 4, 1, 2, 3)
         B, D, t, h, w = z.shape
         N = t*h*w
         attn_mask = self.create_block_causal_mask(t, h, w).to(z.device)
@@ -295,7 +398,7 @@ class OursDiscreteVideoTokenizer(nn.Module):
                 z_1d = z_1d + temporal_embed + self.pos_emb_1d
                 attn_mask = self.create_vit_mask(attn_mask, is_decoder=False)
             else:
-                z_1d = self.full_latent_tokens[None, :int(self.compression_rate * N)].repeat(B, 1, 1)
+                z_1d = self.full_latent_tokens[None, :N].repeat(B, 1, 1)
                 z_1d = z_1d + self.pos_emb_1d
                 attn_mask = None
 
@@ -311,12 +414,14 @@ class OursDiscreteVideoTokenizer(nn.Module):
             )
         
         if self.concat_decode_2d:
-            z = z[:, :int(N * self.compression_rate), :]
-        return z.permute(0, 2, 1).reshape(B, D, t, h, int(w * self.compression_rate))
+            z = z[:, :N, :]
+        z = self.post_vit_conv(z)
+        return z.permute(0, 2, 1).reshape(B, -1, t, h, w)
+        
     
     def vit_decode(self, z):
+        z = self.vit_conv(z.permute(0, 2, 3, 4, 1)).permute(0, 4, 1, 2, 3)
         B, D, t, h, w = z.shape
-        H, W = h, int(w / self.compression_rate)
         attn_mask = self.create_block_causal_mask(t, h, w).to(z.device)
         temporal_embed = self.temporal_embed[:t].reshape(1, t, 1, -1)
         # Add temporal embedding and positional embedding to 1D latent tokens
@@ -326,10 +431,10 @@ class OursDiscreteVideoTokenizer(nn.Module):
         z = z_1d.reshape(B, t*h*w, -1)
         # Add temporal embedding and positional embedding to 2D tokens
         if self.concat_decode_2d:
-            z_2d = self.init_2d_token[:H, :W].reshape(H*W, -1)
+            z_2d = self.init_2d_token[:h, :w].reshape(h*w, -1)
             z_2d = z_2d[None, None].repeat(B, t, 1, 1)
             z_2d = z_2d + temporal_embed + self.pos_emb_2d
-            z = torch.cat([z, z_2d.reshape(B, t*H*W, -1)], dim=1)
+            z = torch.cat([z, z_2d.reshape(B, t*h*w, -1)], dim=1)
 
             attn_mask = self.create_vit_mask(attn_mask, is_decoder=True)
 
@@ -341,12 +446,13 @@ class OursDiscreteVideoTokenizer(nn.Module):
             z = blk(
                 z,
                 attention_mask=attn_mask,
-                position_ids=(t,H,W),
+                position_ids=(t,h,w),
             )
 
         if self.concat_decode_2d:
-            z = z[:, -t*H*W:, :]
-        return z.permute(0, 2, 1).reshape(B, D, t, H, W)
+            z = z[:, -t*h*w:, :]
+        z = self.post_vit_conv(z)
+        return z.permute(0, 2, 1).reshape(B, -1, t, h, w)
         
 
     def encode(self, x):
@@ -376,14 +482,16 @@ class OursDiscreteVideoTokenizer(nn.Module):
     def forward(self, input, n_tries: int = 0):
         quant_info, quant_codes, quant_loss = self.encode(input)
         chunk_loss = None
-        if self.rate_strategy in ['elbo', 'elboema']:
+        if 'elbo' in self.rate_strategy:
             with torch.no_grad():
                 recon_full = self.decode(quant_codes)
-                full_loss = (input - recon_full).abs().mean(dim=[1, 3, 4])
-                chunk_loss = full_loss[:, 1:].reshape(full_loss.shape[0], -1, self.temporal_compression).mean(dim=-1)
+                full_loss = (input - recon_full).abs().mean(dim=1)
+                chunk_loss = full_loss[:, 1:].reshape(full_loss.shape[0], -1, self.temporal_compression, *full_loss.shape[2:]).mean(dim=2)
                 chunk_loss = torch.concat([full_loss[:, :1], chunk_loss], dim=1)
+                chunk_loss = rearrange(chunk_loss, "b t (h u) (w v) -> b t h u w v", u=self.spatial_compression, v=self.spatial_compression).mean(dim=(-1,-3))
+                # chunk loss has shape [B, T, H, W]
                 # print(f"chunk_loss: {chunk_loss.shape}")
-        quant_codes, allocated_ratios = self.adaptive_tokenize(quant_codes, use_adaptive=True, chunk_loss=chunk_loss, manual_rate_idx=None if self.training else n_tries, mask_seq=self.special_attn)
+        quant_codes, allocated_ratios = self.adaptive_tokenize(quant_codes, use_adaptive=True, chunk_loss=chunk_loss, manual_rate_idx=None if self.training else n_tries, mask_seq=self.special_attn, method=self.method)
 
         reconstructions = self.decode(quant_codes)
         if self.training:

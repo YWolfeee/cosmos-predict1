@@ -176,6 +176,8 @@ class FVD(Metric):
             raise NotImplementedError()
 
     def update(self, videos: Tensor, real: bool) -> None:
+        if videos.shape[2] <= 8:
+            return
         features = self.feature_extractor(videos)
         self.orig_dtype = features.dtype
         features = features.double()

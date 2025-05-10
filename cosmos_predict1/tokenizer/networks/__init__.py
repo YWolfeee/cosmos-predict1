@@ -27,6 +27,8 @@ from cosmos_predict1.tokenizer.networks.configs import ours_discrete_video_4x8x8
 from cosmos_predict1.tokenizer.networks.configs import ours_discrete_video_4x8x8_256p_88 as ours_discrete_video_4x8x8_256p_88_dict
 from cosmos_predict1.tokenizer.networks.configs import ours_discrete_video_4x8x8_concat_256p_88 as ours_discrete_video_4x8x8_concat_256p_88_dict
 from cosmos_predict1.tokenizer.networks.configs import ours_discrete_video_4x8x8_special_256p_88 as ours_discrete_video_4x8x8_special_256p_88_dict
+from cosmos_predict1.tokenizer.networks.configs import ours_discrete_video_4x8x8_mse_256p_88 as ours_discrete_video_4x8x8_mse_256p_88_dict
+from cosmos_predict1.tokenizer.networks.configs import ours_discrete_video_4x8x8_order4_256p_88 as ours_discrete_video_4x8x8_order4_256p_88_dict
 from cosmos_predict1.tokenizer.networks.continuous_image import ContinuousImageTokenizer
 from cosmos_predict1.tokenizer.networks.continuous_video import CausalContinuousVideoTokenizer
 from cosmos_predict1.tokenizer.networks.discrete_image import DiscreteImageTokenizer
@@ -71,11 +73,17 @@ class TokenizerConfigs(Enum):
     # Cosmos-Tokenize1-OURS4x8x8-256p-88
     OURS4x8x8_256p_88 = ours_discrete_video_4x8x8_256p_88_dict
 
+    # Cosmos-Tokenize1-OURS4x8x8-256p-88
+    OURS4x8x8_mse_256p_88 = ours_discrete_video_4x8x8_mse_256p_88_dict
+
     # Cosmos-Tokenize1-OURS4x8x8-concat-256p-88
     OURS4x8x8_concat_256p_88 = ours_discrete_video_4x8x8_concat_256p_88_dict
 
     # Cosmos-Tokenize1-OURS4x8x8-special-256p-88
     OURS4x8x8_special_256p_88 = ours_discrete_video_4x8x8_special_256p_88_dict
+
+    # Cosmos-Tokenize1-OURS4x8x8-order4-256p-88
+    OURS4x8x8_order4_256p_88 = ours_discrete_video_4x8x8_order4_256p_88_dict
 
 
 class TokenizerModels(Enum):

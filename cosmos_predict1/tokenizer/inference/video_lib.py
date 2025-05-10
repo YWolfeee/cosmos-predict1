@@ -16,6 +16,7 @@
 """A library for Causal Video Tokenizer inference."""
 
 from typing import Any
+from einops import rearrange
 
 import numpy as np
 import torch
@@ -59,7 +60,7 @@ class CausalVideoTokenizer(torch.nn.Module):
             if checkpoint_dec is not None
             else None
         )
-
+    
     @torch.no_grad()
     def collect_video_elbo(self, input_tensor: torch.Tensor, elbo_base: float = 1.0) -> torch.Tensor:
         """Collect ELBO (Evidence Lower Bound) loss for each temporal block.
@@ -72,25 +73,22 @@ class CausalVideoTokenizer(torch.nn.Module):
         # Check if self has elbos attribute, if not, create a list
         if not hasattr(self, 'elbos'):
             self.elbos = []
-            self.elbo_sum = 0
-            self.count = 0
         if self._full_model is not None:
             hidden_tensor = self._full_model.encode(input_tensor)[1] # output tensor: [1, 6, 13, 32, 52]
-            # print("elbo_base: ", elbo_base)
-            mask = self.create_mask(elbo_base, hidden_tensor.shape[-2], hidden_tensor.shape[-1]).to(hidden_tensor.device, hidden_tensor.dtype)
-            block_mask = torch.ones_like(hidden_tensor)
-            block_mask = block_mask * mask
-            hidden_tensor = hidden_tensor * block_mask
-            output_tensor = self._full_model.decode(hidden_tensor)
-            elbo_loss = self.get_block_loss(output_tensor, input_tensor)
-            if hasattr(self, 'elbo_mean'):
-                elbo_loss = torch.where(elbo_loss > self.elbo_mean * 2, self.elbo_mean * 2, elbo_loss)
-            self.elbos.append(elbo_loss)
-            self.elbo_sum += torch.sum(elbo_loss)
-            self.count += elbo_loss.shape[0]
-            self.elbo_mean = self.elbo_sum / self.count
+            block_loss = self.compute_chunk_loss(hidden_tensor, input_tensor)
+            video_elbo = torch.mean(block_loss)
+            self.elbos.append(video_elbo)
         else:
             raise NotImplementedError("collect_elbo is not implemented for AdaptiveVideoTokenizer")
+        
+    @torch.no_grad()
+    def compute_chunk_loss(self, hidden_tensor: torch.Tensor, input_tensor: torch.Tensor) -> torch.Tensor:
+        recon_full = self._full_model.decode(hidden_tensor)
+        full_loss = (input_tensor - recon_full).abs().mean(dim=1)
+        chunk_loss = full_loss[:, 1:].reshape(full_loss.shape[0], -1, self._full_model.temporal_compression, *full_loss.shape[2:]).mean(dim=2)
+        chunk_loss = torch.concat([full_loss[:, :1], chunk_loss], dim=1)
+        chunk_loss = rearrange(chunk_loss, "b t (h u) (w v) -> b t h u w v", u=self._full_model.spatial_compression, v=self._full_model.spatial_compression).mean(dim=(-1,-3))
+        return chunk_loss
 
     @torch.no_grad()
     def autoencode(self, input_tensor: torch.Tensor, strategy: str = "static", avg_rate: float = 0.5) -> torch.Tensor:
@@ -102,99 +100,33 @@ class CausalVideoTokenizer(torch.nn.Module):
             The reconstructed video, layout Bx3xTxHxW, range [-1..1].
         """
         if self._full_model is not None:
-            # input tensor: [1, 3, 49, 256, 416]
-            hidden_tensor = self._full_model.encode(input_tensor)[1] # output tensor: [1, 6, 13, 32, 52]
-            # full_tensor = self._full_model.decode(hidden_tensor)
-
-            if strategy == "causal_choice":
-                num_blocks = hidden_tensor.shape[2]
-                rates = [1.0, 0.95, 0.9, 0.85, 0.8, 0.7, 0.6, 0.5, 0.25]
-                for block_idx in range(num_blocks):
-                    current_min_loss = float('inf')
-                    current_min_rate = 1.0
-                    for rate in rates: # For each block, choose minimum score
-                        mask = self.create_mask(rate, hidden_tensor.shape[-2], hidden_tensor.shape[-1]).to(hidden_tensor.device, hidden_tensor.dtype)
-                        block_mask = torch.ones_like(hidden_tensor)
-                        block_mask[:, :, block_idx] = block_mask[:, :, block_idx] * mask
-                        adaptive_hidden_tensor = hidden_tensor * block_mask
-                        adaptive_output_tensor = self._full_model.decode(adaptive_hidden_tensor)
-                        adaptive_block_loss = self.get_block_loss(adaptive_output_tensor, input_tensor)
-                        if torch.sum(adaptive_block_loss[:block_idx+1]) < current_min_loss:
-                            current_min_loss = torch.sum(adaptive_block_loss[:block_idx+1])
-                            current_min_rate = rate
-                            hidden_tensor[:, :, block_idx] = adaptive_hidden_tensor[:, :, block_idx]
-                    # print(f"block_idx: {block_idx}, current_min_rate: {current_min_rate}")
-
-            elif strategy == "0.9elbo":
-                # Use 0.5 elbo!
-                mask = self.create_mask(0.9, hidden_tensor.shape[-2], hidden_tensor.shape[-1]).to(hidden_tensor.device, hidden_tensor.dtype)
-                block_mask = torch.ones_like(hidden_tensor)
-                block_mask = block_mask * mask
-                adaptive_hidden_tensor = hidden_tensor * block_mask
-                adaptive_output_tensor = self._full_model.decode(adaptive_hidden_tensor)
-                elbo_loss = self.get_block_loss(adaptive_output_tensor, input_tensor)
-                num_blocks = elbo_loss.shape[0]
-                elbo_loss = elbo_loss / torch.mean(elbo_loss) * avg_rate
-                elbo_loss = torch.where(elbo_loss > 1.0, 1.0, elbo_loss)
-                elbo_loss = torch.where(elbo_loss < 0.3, 0.3, elbo_loss)
-                print(f"elbo_loss: {elbo_loss}, mean: {torch.mean(elbo_loss)}")
-                
-                block_mask = torch.ones_like(hidden_tensor)
-                for block_idx, rate in enumerate(elbo_loss):
-                    mask = self.create_mask(rate, hidden_tensor.shape[-2], hidden_tensor.shape[-1]).to(hidden_tensor.device, hidden_tensor.dtype)
-                    block_mask[:, :, block_idx] = block_mask[:, :, block_idx] * mask
-                hidden_tensor = hidden_tensor * block_mask
-
-            elif strategy == "elbo":
-                output_tensor = self._full_model.decode(hidden_tensor)
-                elbo_loss = self.get_block_loss(output_tensor, input_tensor)
-                num_blocks = elbo_loss.shape[0]
-                elbo_loss = elbo_loss / torch.mean(elbo_loss) * avg_rate
-                print(f"elbo_loss: {elbo_loss}, mean: {torch.mean(elbo_loss)}")
-                block_mask = torch.ones_like(hidden_tensor)
-                for block_idx, rate in enumerate(elbo_loss):
-                    mask = self.create_mask(rate, hidden_tensor.shape[-2], hidden_tensor.shape[-1]).to(hidden_tensor.device, hidden_tensor.dtype)
-                    block_mask[:, :, block_idx] = block_mask[:, :, block_idx] * mask
-                hidden_tensor = hidden_tensor * block_mask
-
-            elif "video_elbo" in strategy or "global_elbo" in strategy:
-                elbo_loss = self.elbos.pop(0)
-                elbo_loss = elbo_loss / self.elbo_mean * avg_rate
-                # elbo_loss = torch.where(elbo_loss > 1.0, 1.0, elbo_loss)
-                # elbo_loss = torch.where(elbo_loss < 0.5, 0.5, elbo_loss)
-                num_blocks = elbo_loss.shape[0]
-                print(f"elbo_loss: {elbo_loss}, mean: {torch.mean(elbo_loss)}")
-                block_mask = torch.ones_like(hidden_tensor)
-                for block_idx, rate in enumerate(elbo_loss):
-                    mask = self.create_mask(rate, hidden_tensor.shape[-2], hidden_tensor.shape[-1]).to(hidden_tensor.device, hidden_tensor.dtype)
-                    block_mask[:, :, block_idx] = block_mask[:, :, block_idx] * mask
-                hidden_tensor = hidden_tensor * block_mask
-
-            elif strategy == "prior":
-                first_block_rate = 0.85
-                other_blocks_rate = (avg_rate * num_blocks - first_block_rate) / (num_blocks - 1)
-                mask = self.create_mask(first_block_rate, hidden_tensor.shape[-2], hidden_tensor.shape[-1]).to(hidden_tensor.device, hidden_tensor.dtype)
-                other_mask = self.create_mask(other_blocks_rate, hidden_tensor.shape[-2], hidden_tensor.shape[-1]).to(hidden_tensor.device, hidden_tensor.dtype)
-                block_mask = torch.ones_like(hidden_tensor)
-                block_mask[:, :, 0] = block_mask[:, :, 0] * mask
-                block_mask[:, :, 1:] = block_mask[:, :, 1:] * other_mask
-                hidden_tensor = hidden_tensor * block_mask
-
-            elif strategy == "static":
-                num_blocks = hidden_tensor.shape[2]
-                mask = self.create_mask(avg_rate, hidden_tensor.shape[-2], hidden_tensor.shape[-1]).to(hidden_tensor.device, hidden_tensor.dtype)
-                block_mask = torch.ones_like(hidden_tensor)
-                block_mask = block_mask * mask
-                hidden_tensor = hidden_tensor * block_mask
-                elbo_loss = torch.ones(num_blocks, device=hidden_tensor.device, dtype=torch.float32)
-
+            # input tensor: [1, 3, 33, 256, 416]
+            hidden_tensor = self._full_model.encode(input_tensor)[1] # output tensor: [1, 6, 9, 32, 52]
+            if hasattr(self._full_model, 'method'):
+                if self._full_model.method == "mse" or self._full_model.special_attn:
+                    mask_seq = True
+                else:
+                    mask_seq = False
+                chunk_loss = self.compute_chunk_loss(hidden_tensor, input_tensor)
+                if strategy == "global_elbo":
+                    rate = avg_rate * torch.mean(chunk_loss) / self.elbo_mean
+                    # Round rate to nearest quarter (0.25, 0.5, 0.75, 1.0)
+                    rate = 0.25 * round(rate.item() / 0.25)
+                    rate = min(max(rate, 0.25), 1.0)
+                    use_strategy = "elbo"
+                else:
+                    rate = avg_rate
+                    use_strategy = strategy
+                allocated_ratios = self._full_model.get_allocated_ratios(hidden_tensor.shape, use_adaptive=True, chunk_loss=chunk_loss, manual_base_rate=rate, mask_seq=mask_seq, overwrite_strategy=use_strategy, rescale=False)
+                print("Current allocated ratios: ", allocated_ratios)
+                hidden_tensor, _ = self._full_model.mask_tokens(hidden_tensor, allocated_ratios, mask_method=self._full_model.method, chunk_loss=chunk_loss)
             output_tensor = self._full_model.decode(hidden_tensor)
-        
+            allocated_ratios = torch.ones_like(hidden_tensor[:, 0, :, 0, 0])
         else:
             output_latent = self.encode(input_tensor)[0]
             output_tensor = self.decode(output_latent)
         
-        return output_tensor, elbo_loss
+        return output_tensor, allocated_ratios
     
     @torch.no_grad()
     def create_mask(self, rate: float, H: int, W: int) -> torch.Tensor:
@@ -347,6 +279,7 @@ class CausalVideoTokenizer(torch.nn.Module):
                 padded_input_video, crop_region = pad_video_batch(input_video)
                 input_tensor = numpy2tensor(padded_input_video, dtype=self._dtype, device=self._device)
                 self.collect_video_elbo(input_tensor, elbo_base)
+            print("Collected ELBO: ", self.elbos[-1])
         
         if collect_elbo_only:
             return        

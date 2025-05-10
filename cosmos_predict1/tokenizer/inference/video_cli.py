@@ -90,6 +90,8 @@ def _parse_args() -> tuple[Namespace, dict[str, Any]]:
             "DV4x8x8-360p",
             "OURS4x8x8-256p",
             "OURS4x8x8-256p-88",
+            "OURS4x8x8-mse-256p-88",
+            "OURS4x8x8-order4-256p-88",
             "OURS4x8x8-concat-256p-88",
             "OURS4x8x8-special-256p-88",
         ],
@@ -218,6 +220,8 @@ def _run_eval() -> None:
                 start, end = idx * temporal_window, (idx + 1) * temporal_window
                 video_clip = video[start:end, ...]
                 print("video_clip.shape: ", video_clip.shape)
+                if video_clip.shape[0] < temporal_window:
+                    continue
                 if args.only_square_clips:
                     if video_clip.shape[1] == video_clip.shape[2]: # only save square clips
                         clip_file_path = output_filepath.replace(".mp4", f"_{idx}.mp4")
@@ -236,6 +240,9 @@ def _run_eval() -> None:
             logging.info("Invoking the autoencoder model in ... ")
             batch_video = video[np.newaxis, ...]
             _ = autoencoder(batch_video, temporal_window=args.temporal_window, strategy=args.strategy, avg_rate=args.avg_rate, collect_elbo_only=True)
+        
+        elbo_fig_path, elbo_mean, elbo_median = visualize_elbo_distribution(autoencoder.elbos, args.output_dir)
+        autoencoder.elbo_mean = elbo_mean # use elbo_median as the mean
 
     token_rates = []
     for filepath in filepaths:
@@ -265,6 +272,48 @@ def _run_eval() -> None:
         f.write(str(token_rates))
     logging.info(f"Token rates saved to {token_rate_filepath}")
 
+def visualize_elbo_distribution(elbos, output_dir):
+    """
+    Visualize the ELBO distribution and save the figure.
+    
+    Args:
+        elbos: List of ELBO values or tensor
+        output_dir: Directory to save the visualization
+    """
+    import matplotlib.pyplot as plt
+    import torch
+    
+    # Convert list of tensors to numpy array
+    if isinstance(elbos, list):
+        if len(elbos) > 0 and isinstance(elbos[0], torch.Tensor):
+            elbos = torch.cat([e.view(-1) for e in elbos]).detach().cpu().float().numpy()
+        else:
+            elbos = np.array(elbos)
+    elif isinstance(elbos, torch.Tensor):
+        elbos = elbos.detach().cpu().float().numpy()
+        
+    # Create the figure
+    plt.figure(figsize=(10, 6))
+    plt.hist(elbos, bins=30, alpha=0.7, color='blue')
+    elbo_mean = np.mean(elbos)
+    elbo_median = np.median(elbos)
+    plt.axvline(elbo_mean, color='red', linestyle='dashed', linewidth=2, label=f'Mean: {elbo_mean:.4f}')
+    plt.axvline(elbo_median, color='green', linestyle='dashed', linewidth=2, label=f'Median: {elbo_median:.4f}')
+    
+    plt.title('ELBO Distribution')
+    plt.xlabel('ELBO Value')
+    plt.ylabel('Frequency')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # Save the figure
+    elbo_fig_path = os.path.join(output_dir, "elbo_distribution.png")
+    os.makedirs(os.path.dirname(elbo_fig_path), exist_ok=True)
+    plt.savefig(elbo_fig_path)
+    plt.close()
+    
+    logging.info(f"ELBO distribution saved to {elbo_fig_path}")
+    return elbo_fig_path, elbo_mean, elbo_median
 
 @logging.catch(reraise=True)
 def main() -> None:

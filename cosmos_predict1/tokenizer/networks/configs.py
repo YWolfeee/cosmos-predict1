@@ -226,7 +226,7 @@ ours_discrete_video = dict(
     decoder=Decoder3DType.FACTORIZED.name,
     rate_strategy='static',
     use_vit=True,
-    freeze_original=True,
+    freeze_original=False,
     vit_config=dict(
         hidden_size=256,
         intermediate_size=512,
@@ -242,6 +242,7 @@ ours_discrete_video = dict(
         max_sequence_length_1d=8192,
         concat_decode_2d=False,
         special_attn=False,
+        method="order"
     ),
 )
 
@@ -262,23 +263,45 @@ ours_discrete_video_4x8x8_256p_88["rate_strategy"] = "uniform"
 ours_discrete_video_4x8x8_256p_88["freeze_original"] = False
 ours_discrete_video_4x8x8_256p_88["vit_config"]["concat_decode_2d"] = False
 
+ours_discrete_video_4x8x8_mse_256p_88 = dict(ours_discrete_video)
+ours_discrete_video_4x8x8_mse_256p_88["temporal_compression"] = 4
+ours_discrete_video_4x8x8_mse_256p_88["spatial_compression"] = 8
+ours_discrete_video_4x8x8_mse_256p_88["rate_strategy"] = "static"
+ours_discrete_video_4x8x8_mse_256p_88["vit_config"] = dict(ours_discrete_video_4x8x8_256p_88["vit_config"])
+ours_discrete_video_4x8x8_mse_256p_88["vit_config"]["num_encoder_layers"] = 8
+ours_discrete_video_4x8x8_mse_256p_88["vit_config"]["num_decoder_layers"] = 8
+ours_discrete_video_4x8x8_mse_256p_88["vit_config"]["concat_decode_2d"] = False
+ours_discrete_video_4x8x8_mse_256p_88["vit_config"]["special_attn"] = False
+ours_discrete_video_4x8x8_mse_256p_88["vit_config"]["method"] = "mse"
+
+ours_discrete_video_4x8x8_order4_256p_88 = dict(ours_discrete_video)
+ours_discrete_video_4x8x8_order4_256p_88["temporal_compression"] = 4
+ours_discrete_video_4x8x8_order4_256p_88["spatial_compression"] = 8
+ours_discrete_video_4x8x8_order4_256p_88["rate_strategy"] = "static"
+ours_discrete_video_4x8x8_order4_256p_88["vit_config"] = dict(ours_discrete_video_4x8x8_256p_88["vit_config"])
+ours_discrete_video_4x8x8_order4_256p_88["vit_config"]["num_encoder_layers"] = 8
+ours_discrete_video_4x8x8_order4_256p_88["vit_config"]["num_decoder_layers"] = 8
+ours_discrete_video_4x8x8_order4_256p_88["vit_config"]["concat_decode_2d"] = False
+ours_discrete_video_4x8x8_order4_256p_88["vit_config"]["special_attn"] = False
+ours_discrete_video_4x8x8_order4_256p_88["vit_config"]["method"] = "order_4"
+
 ours_discrete_video_4x8x8_concat_256p_88 = dict(ours_discrete_video)
 ours_discrete_video_4x8x8_concat_256p_88["temporal_compression"] = 4
 ours_discrete_video_4x8x8_concat_256p_88["spatial_compression"] = 8
+ours_discrete_video_4x8x8_concat_256p_88["vit_config"] = dict(ours_discrete_video_4x8x8_256p_88["vit_config"])
 ours_discrete_video_4x8x8_concat_256p_88["vit_config"]["num_encoder_layers"] = 8
 ours_discrete_video_4x8x8_concat_256p_88["vit_config"]["num_decoder_layers"] = 8
 ours_discrete_video_4x8x8_concat_256p_88["rate_strategy"] = "uniform"
 ours_discrete_video_4x8x8_concat_256p_88["freeze_original"] = False
-ours_discrete_video_4x8x8_concat_256p_88["vit_config"] = dict(ours_discrete_video_4x8x8_256p_88["vit_config"])
 ours_discrete_video_4x8x8_concat_256p_88["vit_config"]["concat_decode_2d"] = True
 
 ours_discrete_video_4x8x8_special_256p_88 = dict(ours_discrete_video)
 ours_discrete_video_4x8x8_special_256p_88["temporal_compression"] = 4
 ours_discrete_video_4x8x8_special_256p_88["spatial_compression"] = 8
+ours_discrete_video_4x8x8_special_256p_88["vit_config"] = dict(ours_discrete_video_4x8x8_256p_88["vit_config"])
 ours_discrete_video_4x8x8_special_256p_88["vit_config"]["num_encoder_layers"] = 8
 ours_discrete_video_4x8x8_special_256p_88["vit_config"]["num_decoder_layers"] = 8
 ours_discrete_video_4x8x8_special_256p_88["rate_strategy"] = "uniform"
 ours_discrete_video_4x8x8_special_256p_88["freeze_original"] = False
-ours_discrete_video_4x8x8_special_256p_88["vit_config"] = dict(ours_discrete_video_4x8x8_256p_88["vit_config"])
 ours_discrete_video_4x8x8_special_256p_88["vit_config"]["concat_decode_2d"] = True
 ours_discrete_video_4x8x8_special_256p_88["vit_config"]["special_attn"] = True

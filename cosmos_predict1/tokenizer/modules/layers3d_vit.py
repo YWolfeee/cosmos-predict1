@@ -307,14 +307,18 @@ class RotaryMultiheadAttention(nn.Module):
                 need_weights=False
             )
         else:
+            q = q.reshape(B, S, n_heads, head_dim).permute(0, 2, 1, 3)  # [B, n_heads, S, head_dim]
+            k = k.reshape(B, S, n_heads, head_dim).permute(0, 2, 1, 3)  # [B, n_heads, S, head_dim]
+            v = v.reshape(B, S, n_heads, head_dim).permute(0, 2, 1, 3)  # [B, n_heads, S, head_dim]
             N1 = S - T*H*W
             if self.type == 'encoder':
                 out = F.scaled_dot_product_attention(q, k, v)
             elif self.type == 'decoder':
                 out0 = F.scaled_dot_product_attention(
-                    q[:,:N1], k[:,:N1], v[:,:N1], is_causal=True)
-                out1 = F.scaled_dot_product_attention(q[:,N1:], k, v)
-                out = torch.cat([out0, out1], dim=1)
+                    q[:,:,:N1], k[:,:,:N1], v[:,:,:N1], is_causal=True)
+                out1 = F.scaled_dot_product_attention(q[:,:,N1:], k, v)
+                out = torch.cat([out0, out1], dim=2)
+            out = out.permute(0, 2, 1, 3).reshape(B, S, E)  # [B, S, E]
         return out
     
 # ------------------------------------------------------------------

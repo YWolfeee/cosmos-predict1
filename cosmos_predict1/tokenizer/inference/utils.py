@@ -95,7 +95,7 @@ def load_decoder_model(
 
 
 def _load_pytorch_model(
-    jit_filepath: str = None, tokenizer_config: str = None, device: str = "cuda"
+    jit_filepath: str = None, tokenizer_config: str = None, device: str = "cuda", use_ema: bool = False
 ) -> torch.nn.Module:
     """Loads a torch.nn.Module from a filepath.
 
@@ -112,7 +112,10 @@ def _load_pytorch_model(
     if "model" in ckpts: # Original setting, the ckpts might include optimizer and other stuff
         ckpts = ckpts["model"]
     # Filter parameters to only include those with keys starting with "network." and remove the prefix
-    ckpts = {k.replace("network.", ""): v for k, v in ckpts.items() if k.startswith("network.")}
+    if use_ema:
+        ckpts = {k.replace("ema.", ""): v for k, v in ckpts.items() if k.startswith("ema.")}
+    else:
+        ckpts = {k.replace("network.", ""): v for k, v in ckpts.items() if k.startswith("network.")}
     return model, ckpts
 
 

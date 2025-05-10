@@ -78,6 +78,37 @@ def PSNR(input0: np.ndarray, input1: np.ndarray) -> float:
     print("input0.shape", input0.shape, "input1.shape", input1.shape)
     assert input0.shape == input1.shape, "inputs should have the same shape"
     mse = ((input0 - input1) ** 2).mean()
+    # print("mse stat:", mse)
+    # # Visualize the first 5 frames of MSE as heatmaps
+    # import matplotlib.pyplot as plt
+    
+    # # Calculate MSE per pixel
+    # mse_per_pixel = ((input0 - input1) ** 2)
+    
+    # # Create a figure with subplots for the first 5 frames
+    # fig, axes = plt.subplots(1, 5, figsize=(20, 4))
+    
+    # # Plot each of the first 5 frames (or fewer if there are less than 5 frames)
+    # num_frames_to_show = min(5, mse_per_pixel.shape[0])
+    
+    # for i in range(num_frames_to_show):
+    #     # Convert RGB MSE to grayscale for better visualization
+    #     frame_mse = mse_per_pixel[i].mean(axis=2)
+        
+    #     # Plot the heatmap
+    #     im = axes[i].imshow(frame_mse, cmap='hot', vmin=0, vmax=np.percentile(frame_mse, 95))
+    #     axes[i].set_title(f'Frame {i} MSE')
+    #     axes[i].axis('off')
+    
+    # # Add a colorbar
+    # plt.colorbar(im, ax=axes, orientation='horizontal', pad=0.05)
+    
+    # plt.tight_layout()
+    # plt.savefig('mse_heatmap_first_5_frames.png')
+    # plt.close()
+    
+    # print(f"MSE visualization saved to 'mse_heatmap_first_5_frames.png'")
+    # assert False
     psnr = 20 * np.log10(_UINT8_MAX_F / (np.sqrt(mse) + _FLOAT32_EPS))
     return psnr.item()
 
