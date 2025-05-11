@@ -3,7 +3,7 @@ set -e
 
 source TokenBench/env.sh
 
-CUDA_VISIBLE_DEVICES=2 python3 -m cosmos_predict1.tokenizer.inference.video_cli \
+CUDA_VISIBLE_DEVICES=1 python3 -m cosmos_predict1.tokenizer.inference.video_cli \
     --video_pattern "${DATASET_DIR}/${GT_VIDEO_CLIPS_DIR}/*.mp4" \
     --checkpoint ${CHECKPOINT_DIR}/${model_name}/${pt_name}.pt \
     --output_dir ${DATASET_DIR}/${OUTPUT_VIDEO_CLIPS_DIR}/${model_name}_${pt_name}_${strategy}${avg_rate} \

@@ -75,7 +75,7 @@ def PSNR(input0: np.ndarray, input1: np.ndarray) -> float:
     Returns:
         The PSNR value.
     """
-    print("input0.shape", input0.shape, "input1.shape", input1.shape)
+    # print("input0.shape", input0.shape, "input1.shape", input1.shape)
     assert input0.shape == input1.shape, "inputs should have the same shape"
     mse = ((input0 - input1) ** 2).mean()
     # print("mse stat:", mse)
@@ -187,12 +187,15 @@ def main_psnr_ssim() -> None:
     if os.path.exists(psnr_filename) and os.path.exists(ssim_filename):
         print(f"{psnr_filename} already exists. Recomputing ...")
         print(f"{ssim_filename} already exists. Recomputing ...")
+    
     print("len(vfiles0)", len(vfiles0), "len(vfiles1)", len(vfiles1))
     assert len(vfiles0) == len(vfiles1), "number of media files must match"
 
-    print(f"Calculating PSNR on  {len(vfiles0)} pairs ...")
+    print(f"Calculating PSNR on {len(vfiles0)} pairs ...")
     psnr_values, ssim_values = list(), list()
-    for input0_file, input1_file in tqdm(zip(vfiles0, vfiles1)):
+    for input0_file, input1_file in tqdm(zip(vfiles0, vfiles1), total=len(vfiles0), desc="Processing videos"):
+        name = input0_file.split("/")[-1]
+        # print(f"{name}")
         assert (
             input0_file.split("/")[-1] == input1_file.split("/")[-1]
         ), "file names must match"
@@ -205,14 +208,13 @@ def main_psnr_ssim() -> None:
             input1 = input1[:input0.shape[0], ...]
         else:
             pass
-
-        name = input0_file.split("/")[-1]
+        
         psnr_value = PSNR(input0, input1)
         ssim_value = SSIM(input0, input1)
 
         psnr_values.append([name, psnr_value])
         ssim_values.append([name, float(ssim_value)])
-        print(f"{name} PSNR: {psnr_value}, SSIM: {ssim_value}")
+        # print(f"PSNR: {psnr_value}, SSIM: {ssim_value}")
 
     print(f"mean PSNR: {np.mean([el[-1] for el in psnr_values])}")
     print(f"mean SSIM: {np.mean([el[-1] for el in ssim_values])}")

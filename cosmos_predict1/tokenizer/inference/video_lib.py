@@ -282,7 +282,7 @@ class CausalVideoTokenizer(torch.nn.Module):
             print("Collected ELBO: ", self.elbos[-1])
         
         if collect_elbo_only:
-            return        
+            return
 
         for idx in tqdm(range(0, (num_frames - 1) // temporal_window + 1)):
             # Input video for the current window.
