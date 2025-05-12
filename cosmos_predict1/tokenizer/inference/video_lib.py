@@ -111,6 +111,8 @@ class CausalVideoTokenizer(torch.nn.Module):
                 else:
                     mask_seq = False
                 chunk_loss = self.compute_chunk_loss(hidden_tensor, input_tensor)
+                if self._full_model.method == "mse":
+                    return hidden_tensor, chunk_loss
                 if strategy == "global_elbo":
                     rate = avg_rate * torch.mean(chunk_loss) / self.elbo_mean
                     rate = rate.clip(0.0625, 1.0).to(hidden_tensor.device)
@@ -335,23 +337,48 @@ class CausalVideoTokenizer(torch.nn.Module):
         encoded_token_rates = []
         crop_regions = []
         iters = math.ceil((num_frames - temporal_window) / (temporal_window - temporal_overlap)) + 1
-        for idx in tqdm(range(0, iters)):
-            start = 0 if idx == 0 else idx * (temporal_window - temporal_overlap)
-            end = start + temporal_window
-            input_video = video[:, start:end, ...]
+        if self._full_model.method == "mse":
+            full_tokens = []
+            full_chunk_loss = []
+            for idx in tqdm(range(0, iters)):
+                start = 0 if idx == 0 else idx * (temporal_window - temporal_overlap)
+                end = start + temporal_window
+                input_video = video[:, start:end, ...]
 
-            # Spatio-temporally pad input_video so it's evenly divisible.
-            padded_input_video, crop_region = pad_video_batch(input_video)
-            crop_regions.append(crop_region)
-            input_tensor = numpy2tensor(padded_input_video, dtype=self._dtype, device=self._device)
-            tokens, token_rate = self.autoencode(input_tensor, strategy, avg_rate, return_encode=True) # tokens: [B, D, T, H, W], token_rate: [B, T]
-            temporal_compression = (input_tensor.shape[2] - 1) // (tokens.shape[2] - 1)
-            num_overlapped_tokens = 0 if start == 0 else (temporal_overlap + temporal_compression - 1) // temporal_compression
-            encoded_tokens.append(tokens[:, :, num_overlapped_tokens:])
-            encoded_token_rates.append(token_rate[:, num_overlapped_tokens:])
+                # Spatio-temporally pad input_video so it's evenly divisible.
+                padded_input_video, crop_region = pad_video_batch(input_video)
+                crop_regions.append(crop_region)
+                input_tensor = numpy2tensor(padded_input_video, dtype=self._dtype, device=self._device)
+                tokens, chunk_loss = self.autoencode(input_tensor, strategy, avg_rate, return_encode=True) # tokens: [B, D, T, H, W], token_rate: [B, T]
+                temporal_compression = (input_tensor.shape[2] - 1) // (tokens.shape[2] - 1)
+                num_overlapped_tokens = 0 if start == 0 else (temporal_overlap + temporal_compression - 1) // temporal_compression
+                tokens = tokens[:, :, num_overlapped_tokens:]
+                chunk_loss = chunk_loss[:, num_overlapped_tokens:]
+                full_tokens.append(tokens)
+                full_chunk_loss.append(chunk_loss)
+            full_tokens = torch.cat(full_tokens, dim=2) # [B, D, T_full, H, W]
+            full_chunk_loss = torch.cat(full_chunk_loss, dim=1) # [B, T_full]
+            allocation_ratios = self._full_model.get_allocated_ratios(full_tokens, use_adaptive=True, chunk_loss=full_chunk_loss, manual_base_rate=avg_rate, mask_seq=True, overwrite_strategy="elbo", rescale=False)
+            full_tokens, _ = self._full_model.mask_tokens(full_tokens, allocation_ratios, mask_method=self._full_model.method, chunk_loss=full_chunk_loss)
+            return full_tokens, allocation_ratios, crop_regions, temporal_compression
+        else:
+            for idx in tqdm(range(0, iters)):
+                start = 0 if idx == 0 else idx * (temporal_window - temporal_overlap)
+                end = start + temporal_window
+                input_video = video[:, start:end, ...]
+
+                # Spatio-temporally pad input_video so it's evenly divisible.
+                padded_input_video, crop_region = pad_video_batch(input_video)
+                crop_regions.append(crop_region)
+                input_tensor = numpy2tensor(padded_input_video, dtype=self._dtype, device=self._device)
+                tokens, token_rate = self.autoencode(input_tensor, strategy, avg_rate, return_encode=True) # tokens: [B, D, T, H, W], token_rate: [B, T]
+                temporal_compression = (input_tensor.shape[2] - 1) // (tokens.shape[2] - 1)
+                num_overlapped_tokens = 0 if start == 0 else (temporal_overlap + temporal_compression - 1) // temporal_compression
+                encoded_tokens.append(tokens[:, :, num_overlapped_tokens:])
+                encoded_token_rates.append(token_rate[:, num_overlapped_tokens:])
         
-        encoded_tokens = torch.cat(encoded_tokens, dim=2) # [B, D, T_full, H, W]
-        encoded_token_rates = torch.cat(encoded_token_rates, dim=1) # [B, T_full]
+            encoded_tokens = torch.cat(encoded_tokens, dim=2) # [B, D, T_full, H, W]
+            encoded_token_rates = torch.cat(encoded_token_rates, dim=1) # [B, T_full]
         return encoded_tokens, encoded_token_rates, crop_regions, temporal_compression
     
     def decode_with_overlap(
@@ -401,6 +428,8 @@ class CausalVideoTokenizer(torch.nn.Module):
             The reconstructed video in range [0..255], layout BxTxHxWx3.
         """
         assert video.ndim == 5, "input video should be of 5D."
+
+        print("Using overlapping")
 
         if "video_elbo" in strategy:
             raise NotImplementedError("video_elbo is bugged and not fully tested yet.")

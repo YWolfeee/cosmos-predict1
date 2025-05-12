@@ -10,7 +10,7 @@ source TokenBench/env.sh
 # 1. Detect GPUs
 # NGPUS=$(nvidia-smi --list-gpus | wc -l)
 # echo "Detected $NGPUS GPUs"
-NGPUS=8
+NGPUS=4
 
 # 2. Gather files and compute splits
 FILES=( "${DATASET_DIR}/${GT_VIDEO_CLIPS_DIR}"/*.mp4 )
@@ -24,7 +24,19 @@ mkdir -p "$OUTPUT_PATH"
 
 # 3. Parallel reconstruction
 for (( i=0; i<NGPUS; i++ )); do
-  SUBDIR="${DATASET_DIR}/${GT_VIDEO_CLIPS_DIR}/subset_${i}"
+  SUBDIR="${DATASET_DIR}/subsets/subset_${i}"
+  mkdir -p "$SUBDIR"
+
+  START=$(( i * PER_GPU ))
+  END=$(( START + PER_GPU ))
+  (( END > TOTAL )) && END=$TOTAL
+
+  # Create symbolic links in the output subset directory
+  for (( j=START; j<END; j++ )); do
+    if [ ! -f "$SUBDIR/$(basename "${FILES[j]}")" ]; then
+      ln -s "${FILES[j]}" "$SUBDIR/"
+    fi
+  done
 
   CUDA_VISIBLE_DEVICES="$i" python3 -m cosmos_predict1.tokenizer.inference.video_cli \
       --video_pattern "${SUBDIR}/*.mp4" \
@@ -43,8 +55,8 @@ wait
 # Change directory and activate conda environment properly
 cd TokenBench
 # Use eval to properly activate conda in the script
-# eval "$(conda shell.bash hook)"
-# conda activate tokenbench
+eval "$(conda shell.bash hook)"
+conda activate tokenbench
 
 modes=(psnr lpips fvd)
 
