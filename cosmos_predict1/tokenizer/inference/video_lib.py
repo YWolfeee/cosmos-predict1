@@ -15,6 +15,7 @@
 
 """A library for Causal Video Tokenizer inference."""
 
+import math
 from typing import Any
 from einops import rearrange
 
@@ -62,7 +63,7 @@ class CausalVideoTokenizer(torch.nn.Module):
         )
     
     @torch.no_grad()
-    def collect_video_elbo(self, input_tensor: torch.Tensor, elbo_base: float = 1.0) -> torch.Tensor:
+    def collect_video_elbo(self, input_tensor: torch.Tensor, elbo_base: float = 1.0, overlap_window: int = 0, is_start: bool = False) -> torch.Tensor:
         """Collect ELBO (Evidence Lower Bound) loss for each temporal block.
         
         Args:
@@ -76,7 +77,9 @@ class CausalVideoTokenizer(torch.nn.Module):
         if self._full_model is not None:
             hidden_tensor = self._full_model.encode(input_tensor)[1] # output tensor: [1, 6, 13, 32, 52]
             block_loss = self.compute_chunk_loss(hidden_tensor, input_tensor)
-            video_elbo = torch.mean(block_loss)
+            temporal_compression = (input_tensor.shape[2] - 1) // (hidden_tensor.shape[2] - 1)
+            start_idx = 0 if is_start else (overlap_window + temporal_compression - 1) // temporal_compression
+            video_elbo = torch.mean(block_loss[:, start_idx:])
             self.elbos.append(video_elbo)
         else:
             raise NotImplementedError("collect_elbo is not implemented for AdaptiveVideoTokenizer")
@@ -91,7 +94,7 @@ class CausalVideoTokenizer(torch.nn.Module):
         return chunk_loss
 
     @torch.no_grad()
-    def autoencode(self, input_tensor: torch.Tensor, strategy: str = "static", avg_rate: float = 0.5) -> torch.Tensor:
+    def autoencode(self, input_tensor: torch.Tensor, strategy: str = "static", avg_rate: float = 0.5, return_encode: bool = False) -> torch.Tensor:
         """Reconstrcuts a batch of video tensors after embedding into a latent.
 
         Args:
@@ -110,9 +113,6 @@ class CausalVideoTokenizer(torch.nn.Module):
                 chunk_loss = self.compute_chunk_loss(hidden_tensor, input_tensor)
                 if strategy == "global_elbo":
                     rate = avg_rate * torch.mean(chunk_loss) / self.elbo_mean
-                    # Round rate to nearest quarter (0.25, 0.5, 0.75, 1.0)
-                    # rate = 0.25 * round(rate.item() / 0.25)
-                    # rate = min(max(rate, 0.25), 1.0)
                     rate = rate.clip(0.0625, 1.0).to(hidden_tensor.device)
                     use_strategy = "elbo"
                 elif strategy == 'global_elbo_bin':
@@ -128,8 +128,12 @@ class CausalVideoTokenizer(torch.nn.Module):
                 allocated_ratios = self._full_model.get_allocated_ratios(hidden_tensor, use_adaptive=True, chunk_loss=chunk_loss, manual_base_rate=rate, mask_seq=mask_seq, overwrite_strategy=use_strategy, rescale=False)
                 print("Current allocated ratios: ", allocated_ratios)
                 hidden_tensor, _ = self._full_model.mask_tokens(hidden_tensor, allocated_ratios, mask_method=self._full_model.method, chunk_loss=chunk_loss)
+            else:
+                allocated_ratios = torch.ones_like(hidden_tensor[:, 0, :, 0, 0])
+            
+            if return_encode:
+                return hidden_tensor, allocated_ratios
             output_tensor = self._full_model.decode(hidden_tensor)
-            allocated_ratios = torch.ones_like(hidden_tensor[:, 0, :, 0, 0])
         else:
             output_latent = self.encode(input_tensor)[0]
             output_tensor = self.decode(output_latent)
@@ -254,6 +258,7 @@ class CausalVideoTokenizer(torch.nn.Module):
         strategy: str = "static",
         avg_rate: float = 0.5,
         collect_elbo_only: bool = False,
+        overlap_window: int = 0
     ) -> np.ndarray:
         """Reconstructs video using a pre-trained CausalTokenizer autoencoder.
         Given a video of arbitrary length, the forward invokes the CausalVideoTokenizer
@@ -266,6 +271,10 @@ class CausalVideoTokenizer(torch.nn.Module):
             The reconstructed video in range [0..255], layout BxTxHxWx3.
         """
         assert video.ndim == 5, "input video should be of 5D."
+        
+        if overlap_window > 0:
+            return self.forward_with_overlap(video, temporal_window, strategy, avg_rate, collect_elbo_only, overlap_window)
+        
         num_frames = video.shape[1]  # can be of any length.
         output_video_list = []
 
@@ -312,6 +321,109 @@ class CausalVideoTokenizer(torch.nn.Module):
         if isinstance(token_rate, torch.Tensor):
             token_rate = token_rate.detach().cpu().tolist()
         return np.concatenate(output_video_list, axis=1), token_rate
+    
+    def encode_with_overlap(
+        self,
+        video: np.ndarray,
+        temporal_window: int = 17,
+        strategy: str = "static",
+        avg_rate: float = 0.5,
+        temporal_overlap: int = 1,
+    ) -> tuple[torch.Tensor, torch.Tensor, tuple[int, int, int, int]]:
+        num_frames = video.shape[1]  # can be of any length.
+        encoded_tokens = []
+        encoded_token_rates = []
+        crop_regions = []
+        iters = math.ceil((num_frames - temporal_window) / (temporal_window - temporal_overlap)) + 1
+        for idx in tqdm(range(0, iters)):
+            start = 0 if idx == 0 else idx * (temporal_window - temporal_overlap)
+            end = start + temporal_window
+            input_video = video[:, start:end, ...]
+
+            # Spatio-temporally pad input_video so it's evenly divisible.
+            padded_input_video, crop_region = pad_video_batch(input_video)
+            crop_regions.append(crop_region)
+            input_tensor = numpy2tensor(padded_input_video, dtype=self._dtype, device=self._device)
+            tokens, token_rate = self.autoencode(input_tensor, strategy, avg_rate, return_encode=True) # tokens: [B, D, T, H, W], token_rate: [B, T]
+            temporal_compression = (input_tensor.shape[2] - 1) // (tokens.shape[2] - 1)
+            num_overlapped_tokens = 0 if start == 0 else (temporal_overlap + temporal_compression - 1) // temporal_compression
+            encoded_tokens.append(tokens[:, :, num_overlapped_tokens:])
+            encoded_token_rates.append(token_rate[:, num_overlapped_tokens:])
+        
+        encoded_tokens = torch.cat(encoded_tokens, dim=2) # [B, D, T_full, H, W]
+        encoded_token_rates = torch.cat(encoded_token_rates, dim=1) # [B, T_full]
+        return encoded_tokens, encoded_token_rates, crop_regions, temporal_compression
+    
+    def decode_with_overlap(
+        self,
+        encoded_tokens: torch.Tensor,
+        temporal_compression: int,
+        crop_regions: list[tuple[int, int, int, int]],
+        temporal_window: int = 17,
+        temporal_overlap: int = 1
+    ) -> np.ndarray:
+        output_video_list = []
+        num_total_tokens = encoded_tokens.shape[2]
+        temporal_token_window = math.ceil(temporal_window / temporal_compression)
+        temporal_token_overlap = math.ceil(temporal_overlap / temporal_compression)
+        iters = math.ceil((num_total_tokens - temporal_token_window) / (temporal_token_window - temporal_token_overlap)) + 1
+        for idx in tqdm(range(0, iters)):
+            start = 0 if idx == 0 else idx * (temporal_token_window - temporal_token_overlap)
+            end = start + temporal_token_window
+            input_tokens = encoded_tokens[:, :, start:end]
+            output_tensor = self._full_model.decode(input_tokens)
+            padded_output_video = tensor2numpy(output_tensor)
+            output_video = unpad_video_batch(padded_output_video, crop_regions[idx])
+            start_idx = 0 if start == 0 else temporal_overlap
+            output_video_list.append(output_video[:, start_idx:])
+        
+        output_video = np.concatenate(output_video_list, axis=1)
+        return output_video
+    
+    @torch.no_grad()
+    def forward_with_overlap(
+        self,
+        video: np.ndarray,
+        temporal_window: int = 17,
+        strategy: str = "static",
+        avg_rate: float = 0.5,
+        collect_elbo_only: bool = False,
+        temporal_overlap: int = 1,
+    ) -> np.ndarray:
+        """Reconstructs video using a pre-trained CausalTokenizer autoencoder.
+        Given a video of arbitrary length, the forward invokes the CausalVideoTokenizer
+        in a sliding manner with a `temporal_window` size.
+
+        Args:
+            video: The input video BxTxHxWx3 layout, range [0..255].
+            temporal_window: The length of the temporal window to process, default=25.
+        Returns:
+            The reconstructed video in range [0..255], layout BxTxHxWx3.
+        """
+        assert video.ndim == 5, "input video should be of 5D."
+
+        if "video_elbo" in strategy:
+            raise NotImplementedError("video_elbo is bugged and not fully tested yet.")
+
+        if "video_elbo" in strategy or ("global_elbo" in strategy and collect_elbo_only):
+            print("Start collecting global ELBO ...")
+            num_frames = video.shape[1]  # can be of any length.
+            iters = math.ceil((num_frames - temporal_window) / (temporal_window - temporal_overlap)) + 1
+            for idx in tqdm(range(0, iters)):
+                start = 0 if idx == 0 else idx * (temporal_window - temporal_overlap)
+                end = start + temporal_window
+                input_video = video[:, start:end, ...]
+                # Spatio-temporally pad input_video so it's evenly divisible.
+                padded_input_video, crop_region = pad_video_batch(input_video)
+                input_tensor = numpy2tensor(padded_input_video, dtype=self._dtype, device=self._device)
+                self.collect_video_elbo(input_tensor, temporal_overlap, is_start= start == 0)
+        
+        if collect_elbo_only:
+            return
+        
+        encoded_tokens, encoded_token_rates, crop_regions, temporal_compression = self.encode_with_overlap(video, temporal_window, strategy, avg_rate, temporal_overlap)
+        output_video = self.decode_with_overlap(encoded_tokens, temporal_compression, crop_regions, temporal_window, temporal_overlap)
+        return output_video, encoded_token_rates
     
 class AdaptiveVideoTokenizer(torch.nn.Module):
     # TODO: Implement the inference code of AdaptiveVideoTokenizer

@@ -162,6 +162,12 @@ def _parse_args() -> tuple[Namespace, dict[str, Any]]:
         action="store_true",
         help="If on, only square clips will be saved.",
     )
+    parser.add_argument(
+        "--overlap_window",
+        type=int,
+        default=0,
+        help="If using overlapping during inference",
+    )
     args = parser.parse_args()
     return args
 
@@ -239,7 +245,7 @@ def _run_eval() -> None:
 
             logging.info("Invoking the autoencoder model in ... ")
             batch_video = video[np.newaxis, ...]
-            _ = autoencoder(batch_video, temporal_window=args.temporal_window, strategy=args.strategy, avg_rate=args.avg_rate, collect_elbo_only=True)
+            _ = autoencoder(batch_video, temporal_window=args.temporal_window, strategy=args.strategy, avg_rate=args.avg_rate, collect_elbo_only=True, overlap_window=args.overlap_window)
         
         elbo_fig_path, elbo_mean, elbo_median = visualize_elbo_distribution(autoencoder.elbos, args.output_dir)
         autoencoder.elbo_mean = elbo_mean # use elbo_median as the mean
@@ -252,12 +258,16 @@ def _run_eval() -> None:
 
         logging.info("Invoking the autoencoder model in ... ")
         batch_video = video[np.newaxis, ...]
-        output_video, token_rate = autoencoder(batch_video, temporal_window=args.temporal_window, strategy=args.strategy, avg_rate=args.avg_rate)
+        output_video, token_rate = autoencoder(batch_video, temporal_window=args.temporal_window, strategy=args.strategy, avg_rate=args.avg_rate, overlap_window=args.overlap_window)
         output_video = output_video[0]
         token_rates.append([os.path.basename(filepath), token_rate])
         
         logging.info("Constructing output filepath ...")
-        output_filepath = get_output_filepath(filepath, output_dir=args.output_dir)
+        if args.overlap_window > 0:
+            output_dir = args.output_dir + "_overlap" + str(args.overlap_window)
+        else:
+            output_dir = args.output_dir
+        output_filepath = get_output_filepath(filepath, output_dir=output_dir)
         logging.info(f"Outputing {output_filepath} ...")
         write_video(output_filepath, output_video, fps=args.output_fps)
         if args.save_input:

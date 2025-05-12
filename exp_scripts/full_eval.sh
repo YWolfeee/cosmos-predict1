@@ -34,7 +34,8 @@ for (( i=0; i<NGPUS; i++ )); do
       --mode torch \
       --strategy "${strategy}" \
       --avg_rate "${avg_rate}" \
-      --tokenizer_type "${tokenizer_type}" &
+      --tokenizer_type "${tokenizer_type}" \
+      --overlap_window ${overlap_window} &
 done
 
 wait

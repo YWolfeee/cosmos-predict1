@@ -12,4 +12,5 @@ CUDA_VISIBLE_DEVICES=1 python3 -m cosmos_predict1.tokenizer.inference.video_cli 
     --strategy ${strategy} \
     --avg_rate ${avg_rate} \
     --tokenizer_type ${tokenizer_type} \
+    --overlap_window 17
     

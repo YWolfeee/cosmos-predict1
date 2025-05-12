@@ -4,6 +4,8 @@ export GT_VIDEO_CLIPS_DIR="tokenbench_v1_fps_30_240p"
 export OUTPUT_VIDEO_CLIPS_DIR="reconstructions_temp"
 export CHECKPOINT_DIR="/joint_training/runimage/imaginaire4/ckpts"
 
+export overlap_window=17 # Assign 0 to disable overlapping
+
 # # Pure2d + Layer (8, 8) + Elbo
 export model_name="mock_DV4x8x8_t49_256p_c16_merge_DV_haotian_finetune_from_static_pure2d_layer88_elbo_nofreeze"
 export pt_name="iter_000200000"
