@@ -105,6 +105,12 @@ def _parse_args() -> tuple[Namespace, dict[str, Any]]:
         help="Specify the backend: native 'torch' or 'jit' (default: 'jit')",
     )
     parser.add_argument(
+        "--temporal_overlap",
+        type=int,
+        default=1,
+        help="Specify the overlap frames for the tokenizer.",
+    )
+    parser.add_argument(
         "--short_size",
         type=int,
         default=None,
@@ -195,7 +201,7 @@ def _run_eval() -> None:
         checkpoint_dec=args.checkpoint_dec,
         tokenizer_config=_config,
         device=args.device,
-        dtype=args.dtype,
+        dtype=args.dtype
     )
 
     logging.info(f"Looking for files matching video_pattern={args.video_pattern} ...")
@@ -203,6 +209,9 @@ def _run_eval() -> None:
     logging.info(f"Found {len(filepaths)} videos from {args.video_pattern}.")
 
     print("Tokenizer Type: ", args.tokenizer_type)
+
+    if args.temporal_overlap > 0:
+        args.output_dir = args.output_dir + "_overlap" + str(args.temporal_overlap)
 
     if args.save_clip:
         for filepath in filepaths:
@@ -239,7 +248,7 @@ def _run_eval() -> None:
 
             logging.info("Invoking the autoencoder model in ... ")
             batch_video = video[np.newaxis, ...]
-            _ = autoencoder(batch_video, temporal_window=args.temporal_window, strategy=args.strategy, avg_rate=args.avg_rate, collect_elbo_only=True)
+            _ = autoencoder.forward_with_overlap(batch_video, temporal_window=args.temporal_window, strategy=args.strategy, avg_rate=args.avg_rate, collect_elbo_only=True)
         
         elbo_fig_path, elbo_mean, elbo_median = visualize_elbo_distribution(autoencoder.elbos, args.output_dir)
         autoencoder.elbo_mean = elbo_mean # use elbo_median as the mean
@@ -252,7 +261,7 @@ def _run_eval() -> None:
 
         logging.info("Invoking the autoencoder model in ... ")
         batch_video = video[np.newaxis, ...]
-        output_video, token_rate = autoencoder(batch_video, temporal_window=args.temporal_window, strategy=args.strategy, avg_rate=args.avg_rate)
+        output_video, token_rate = autoencoder.forward_with_overlap(batch_video, temporal_window=args.temporal_window, strategy=args.strategy, avg_rate=args.avg_rate, temporal_overlap=args.temporal_overlap)
         output_video = output_video[0]
         token_rates.append([os.path.basename(filepath), token_rate])
         

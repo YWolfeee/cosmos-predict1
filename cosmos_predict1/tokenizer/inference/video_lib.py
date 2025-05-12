@@ -62,7 +62,7 @@ class CausalVideoTokenizer(torch.nn.Module):
         )
     
     @torch.no_grad()
-    def collect_video_elbo(self, input_tensor: torch.Tensor, elbo_base: float = 1.0) -> torch.Tensor:
+    def collect_video_elbo(self, input_tensor: torch.Tensor, temporal_overlap: int = 1, is_start: bool = False) -> torch.Tensor:
         """Collect ELBO (Evidence Lower Bound) loss for each temporal block.
         
         Args:
@@ -75,8 +75,10 @@ class CausalVideoTokenizer(torch.nn.Module):
             self.elbos = []
         if self._full_model is not None:
             hidden_tensor = self._full_model.encode(input_tensor)[1] # output tensor: [1, 6, 13, 32, 52]
+            temporal_compression = (input_tensor.shape[2] - 1) // (hidden_tensor.shape[2] - 1)
+            start_idx = 0 if is_start else (temporal_overlap + temporal_compression - 1) // temporal_compression
             block_loss = self.compute_chunk_loss(hidden_tensor, input_tensor)
-            video_elbo = torch.mean(block_loss)
+            video_elbo = torch.mean(block_loss[:, start_idx:])
             self.elbos.append(video_elbo)
         else:
             raise NotImplementedError("collect_elbo is not implemented for AdaptiveVideoTokenizer")
@@ -87,8 +89,42 @@ class CausalVideoTokenizer(torch.nn.Module):
         full_loss = (input_tensor - recon_full).abs().mean(dim=1)
         chunk_loss = full_loss[:, 1:].reshape(full_loss.shape[0], -1, self._full_model.temporal_compression, *full_loss.shape[2:]).mean(dim=2)
         chunk_loss = torch.concat([full_loss[:, :1], chunk_loss], dim=1)
-        chunk_loss = rearrange(chunk_loss, "b t (h u) (w v) -> b t h u w v", u=self._full_model.spatial_compression, v=self._full_model.spatial_compression).mean(dim=(-1,-3))
+        chunk_loss = rearrange(chunk_loss, "b t (h u) (w v) -> b t h u w v", u=self._full_model.spatial_compression, v=self._full_model.spatial_compression).mean(dim=(-1,-3)) # [B, T, H, W]
         return chunk_loss
+    
+    @torch.no_grad()
+    def adaptive_encode(self, input_tensor: torch.Tensor, strategy: str = "static", avg_rate: float = 0.5) -> torch.Tensor:
+        assert self._full_model is not None, "self._full_model is not None"
+        hidden_tensor = self._full_model.encode(input_tensor)[1] # output tensor: [1, 6, 9, 32, 52]
+        if hasattr(self._full_model, 'method'):
+            if self._full_model.method == "mse" or self._full_model.special_attn:
+                mask_seq = True
+            else:
+                mask_seq = False
+            chunk_loss = self.compute_chunk_loss(hidden_tensor, input_tensor)
+            if strategy == "global_elbo":
+                rate = avg_rate * torch.mean(chunk_loss) / self.elbo_mean
+                # Round rate to nearest quarter (0.25, 0.5, 0.75, 1.0)
+                rate = 0.25 * round(rate.item() / 0.25)
+                rate = min(max(rate, 0.25), 1.0)
+                use_strategy = "elbo"
+            else:
+                rate = avg_rate
+                use_strategy = strategy
+            allocated_ratios = self._full_model.get_allocated_ratios(hidden_tensor.shape, use_adaptive=True, chunk_loss=chunk_loss, manual_base_rate=rate, mask_seq=mask_seq, overwrite_strategy=use_strategy, rescale=False)
+            print("Current allocated ratios: ", allocated_ratios)
+            hidden_tensor, _ = self._full_model.mask_tokens(hidden_tensor, allocated_ratios, mask_method=self._full_model.method, chunk_loss=chunk_loss)
+        else:
+            allocated_ratios = torch.ones_like(hidden_tensor[:, 0, :, 0, 0])
+        return hidden_tensor, allocated_ratios
+    
+    @torch.no_grad()
+    def adaptive_decode(self, hidden_tensor: torch.Tensor) -> torch.Tensor:
+        if self._full_model is not None:
+            output_tensor = self._full_model.decode(hidden_tensor)
+        else:
+            output_tensor = self.decode(hidden_tensor)
+        return output_tensor
 
     @torch.no_grad()
     def autoencode(self, input_tensor: torch.Tensor, strategy: str = "static", avg_rate: float = 0.5) -> torch.Tensor:
@@ -100,109 +136,15 @@ class CausalVideoTokenizer(torch.nn.Module):
             The reconstructed video, layout Bx3xTxHxW, range [-1..1].
         """
         if self._full_model is not None:
-            # input tensor: [1, 3, 33, 256, 416]
-            hidden_tensor = self._full_model.encode(input_tensor)[1] # output tensor: [1, 6, 9, 32, 52]
-            if hasattr(self._full_model, 'method'):
-                if self._full_model.method == "mse" or self._full_model.special_attn:
-                    mask_seq = True
-                else:
-                    mask_seq = False
-                chunk_loss = self.compute_chunk_loss(hidden_tensor, input_tensor)
-                if strategy == "global_elbo":
-                    rate = avg_rate * torch.mean(chunk_loss) / self.elbo_mean
-                    # Round rate to nearest quarter (0.25, 0.5, 0.75, 1.0)
-                    rate = 0.25 * round(rate.item() / 0.25)
-                    rate = min(max(rate, 0.25), 1.0)
-                    use_strategy = "elbo"
-                else:
-                    rate = avg_rate
-                    use_strategy = strategy
-                allocated_ratios = self._full_model.get_allocated_ratios(hidden_tensor.shape, use_adaptive=True, chunk_loss=chunk_loss, manual_base_rate=rate, mask_seq=mask_seq, overwrite_strategy=use_strategy, rescale=False)
-                print("Current allocated ratios: ", allocated_ratios)
-                hidden_tensor, _ = self._full_model.mask_tokens(hidden_tensor, allocated_ratios, mask_method=self._full_model.method, chunk_loss=chunk_loss)
+            hidden_tensor, allocated_ratios = self.adaptive_encode(input_tensor, strategy, avg_rate)
             output_tensor = self._full_model.decode(hidden_tensor)
-            allocated_ratios = torch.ones_like(hidden_tensor[:, 0, :, 0, 0])
         else:
             output_latent = self.encode(input_tensor)[0]
             output_tensor = self.decode(output_latent)
+            allocated_ratios = torch.ones_like(output_latent[:, 0, :, 0, 0])
         
         return output_tensor, allocated_ratios
     
-    @torch.no_grad()
-    def create_mask(self, rate: float, H: int, W: int) -> torch.Tensor:
-        token_length = H * W
-        indices = torch.arange(token_length, device=self._device)
-        mask = torch.where(indices < token_length * rate, 
-                           torch.ones_like(indices, dtype=torch.float32), 
-                           torch.zeros_like(indices, dtype=torch.float32))
-        mask = mask.reshape(H, W)
-        return mask
-    
-    @torch.no_grad()
-    def get_block_loss(self, output_tensor: torch.Tensor, input_tensor: torch.Tensor) -> torch.Tensor:
-        l2_loss = torch.nn.functional.mse_loss(output_tensor, input_tensor, reduction="none")
-        l2_loss = l2_loss.mean(dim=(0,1,3,4)) # loss along frames
-        num_groups = (l2_loss.shape[0] + 3) // 4
-        padded_length = num_groups * 4 - l2_loss.shape[0]
-        padded_loss = torch.nn.functional.pad(l2_loss, (0, padded_length), value=l2_loss[0].item())
-        block_score = torch.sum(padded_loss.reshape(num_groups, 4), dim=1)
-        return block_score
-    
-    @torch.no_grad()
-    def get_token_loss_curve(self, input_tensor: torch.Tensor) -> torch.Tensor:
-        if self._full_model is not None:
-            # input tensor: [1, 3, 49, 256, 416]
-            full_tensor = self._full_model.encode(input_tensor)[1] # output tensor: [1, 6, 13, 32, 52]
-            output_tensor = self._full_model.decode(full_tensor)
-            
-            # Get the block score
-            block_score = self.get_block_loss(output_tensor, input_tensor)
-            
-            # Create a list to store rates and scores for all blocks
-            rates = [1.0, 0.95, 0.9, 0.85, 0.8, 0.7, 0.5, 0.3, 0.1, 0.05]
-            num_blocks = len(block_score)
-            all_scores = {i: [] for i in range(num_blocks)}
-            
-            # Mask each block separately with different rates
-            current_tensor = full_tensor
-            for block_idx in range(num_blocks):
-                min_loss = float('inf')
-                min_rate = 1.0
-                for rate in rates:
-                    mask = self.create_mask(rate, full_tensor.shape[-2], full_tensor.shape[-1])
-                    # Create a new tensor using multiplication without in-place operations
-                    block_mask = torch.ones_like(full_tensor)
-                    block_mask[:, :, block_idx] = block_mask[:, :, block_idx] * mask
-                    partial_tensor = current_tensor * block_mask
-                    output_tensor = self._full_model.decode(partial_tensor)
-                    partial_block_score = self.get_block_loss(output_tensor, input_tensor)
-                    if torch.sum(partial_block_score[:block_idx+1]) < min_loss:
-                        min_loss = torch.sum(partial_block_score[:block_idx+1])
-                        min_rate = rate
-                        current_tensor[:, :, block_idx] = partial_tensor[:, :, block_idx]
-                    # print(f"rate: {rate}, block_idx: {block_idx}, partial_block_score: {partial_block_score}")
-                    all_scores[block_idx].append(partial_block_score[block_idx].item())
-                print(f"block_idx: {block_idx}, min_rate: {min_rate}")
-            
-            # Plot and save the results with all blocks in one figure
-            print("------ Start All Scores ------")
-            print(all_scores)
-            print("------ End All Scores ------")
-            plt.figure(figsize=(10, 8))
-            for block_idx in range(num_blocks):
-                plt.plot(rates, all_scores[block_idx], marker='o', linestyle='-', label=f'Block {block_idx}')
-            
-            plt.xlabel('Rate')
-            plt.ylabel('Block Score')
-            plt.title('Block Score vs Rate for All Blocks')
-            plt.legend()
-            plt.grid(True)
-            plt.savefig('block_scores.png')
-            plt.close()
-        else:
-            raise NotImplementedError("get_token_loss_curve is not implemented for AdaptiveVideoTokenizer")
-        return None
-
     @torch.no_grad()
     def encode(self, input_tensor: torch.Tensor) -> tuple[torch.Tensor]:
         """Encodes a numpy video into a CausalVideo latent or code.
@@ -238,6 +180,111 @@ class CausalVideoTokenizer(torch.nn.Module):
         """
         assert input_latent.ndim >= 4, "input latent should be of 5D for continuous and 4D for discrete."
         return self._dec_model(input_latent)
+    
+    def encode_with_overlap(
+        self,
+        video: np.ndarray,
+        temporal_window: int = 17,
+        strategy: str = "static",
+        avg_rate: float = 0.5,
+        temporal_overlap: int = 1,
+    ) -> tuple[torch.Tensor, torch.Tensor, tuple[int, int, int, int]]:
+        num_frames = video.shape[1]  # can be of any length.
+        encoded_tokens = []
+        encoded_token_rates = []
+        iters = (num_frames - temporal_window) // (temporal_window - temporal_overlap) + 1
+        for idx in tqdm(range(0, iters)):
+            start = 0 if idx == 0 else idx * (temporal_window - temporal_overlap)
+            end = start + temporal_window
+            input_video = video[:, start:end, ...]
+
+            # Spatio-temporally pad input_video so it's evenly divisible.
+            padded_input_video, crop_region = pad_video_batch(input_video)
+            input_tensor = numpy2tensor(padded_input_video, dtype=self._dtype, device=self._device)
+            tokens, token_rate = self.adaptive_encode(input_tensor, strategy, avg_rate) # tokens: [B, D, T, H, W], token_rate: [B, T]
+            temporal_compression = (temporal_window - 1) // (tokens.shape[2] - 1)
+            start_idx = 0 if start == 0 else (temporal_overlap + temporal_compression - 1) // temporal_compression
+            encoded_tokens.append(tokens[:, :, start_idx:])
+            encoded_token_rates.append(token_rate[:, start_idx:])
+        
+        encoded_tokens = torch.cat(encoded_tokens, dim=2) # [B, D, T_full, H, W]
+        encoded_token_rates = torch.cat(encoded_token_rates, dim=1), # [B, T_full]
+        return encoded_tokens, encoded_token_rates, crop_region, temporal_compression
+    
+    def decode_with_overlap(
+        self,
+        encoded_tokens: torch.Tensor,
+        temporal_compression: int,
+        crop_region: tuple[int, int, int, int],
+        temporal_window: int = 17,
+        temporal_overlap: int = 1
+    ) -> np.ndarray:
+        output_video_list = []
+        num_total_tokens = encoded_tokens.shape[2]
+        temporal_token_window = (temporal_window + temporal_compression - 1) // temporal_compression
+        temporal_token_overlap = (temporal_overlap + temporal_compression - 1) // temporal_compression
+        iters = (num_total_tokens - temporal_token_window) // (temporal_token_window - temporal_token_overlap) + 1
+        for idx in tqdm(range(0, iters)):
+            start = 0 if idx == 0 else idx * (temporal_token_window - temporal_token_overlap)
+            end = start + temporal_token_window
+            input_tokens = encoded_tokens[:, :, start:end]
+            output_tensor = self.adaptive_decode(input_tokens)
+            padded_output_video = tensor2numpy(output_tensor)
+            output_video = unpad_video_batch(padded_output_video, crop_region)
+            start_idx = 0 if start == 0 else temporal_overlap
+            output_video_list.append(output_video[:, start_idx:])
+        
+        output_video = np.concatenate(output_video_list, axis=1)
+        return output_video
+    
+    def forward_with_overlap(
+        self,
+        video: np.ndarray,
+        temporal_window: int = 17,
+        strategy: str = "static",
+        avg_rate: float = 0.5,
+        collect_elbo_only: bool = False,
+        temporal_overlap: int = 1,
+    ) -> np.ndarray:
+        """Reconstructs video using a pre-trained CausalTokenizer autoencoder.
+        Given a video of arbitrary length, the forward invokes the CausalVideoTokenizer
+        in a sliding manner with a `temporal_window` size.
+
+        Args:
+            video: The input video BxTxHxWx3 layout, range [0..255].
+            temporal_window: The length of the temporal window to process, default=25.
+        Returns:
+            The reconstructed video in range [0..255], layout BxTxHxWx3.
+        """
+        assert video.ndim == 5, "input video should be of 5D."
+
+        if "video_elbo" in strategy:
+            raise NotImplementedError("video_elbo is bugged and not fully tested yet.")
+
+        if "video_elbo" in strategy or ("global_elbo" in strategy and collect_elbo_only):
+            print("Start collecting global ELBO ...")
+            if strategy != "video_elbo" and strategy != "global_elbo":
+                elbo_base = float(strategy[:3]) # [1.0, 0.5]
+            else:
+                elbo_base = 1.0
+            num_frames = video.shape[1]  # can be of any length.
+            iters = (num_frames - temporal_window) // (temporal_window - temporal_overlap) + 1
+            for idx in tqdm(range(0, iters)):
+                start = 0 if idx == 0 else idx * (temporal_window - temporal_overlap)
+                end = start + temporal_window
+                input_video = video[:, start:end, ...]
+                # Spatio-temporally pad input_video so it's evenly divisible.
+                padded_input_video, crop_region = pad_video_batch(input_video)
+                input_tensor = numpy2tensor(padded_input_video, dtype=self._dtype, device=self._device)
+                self.collect_video_elbo(input_tensor, temporal_overlap, is_start= start == 0)
+        
+        if collect_elbo_only:
+            return
+        
+        encoded_tokens, encoded_token_rates, crop_region, temporal_compression = self.encode_with_overlap(video, temporal_window, strategy, avg_rate, temporal_overlap)
+        output_video = self.decode_with_overlap(encoded_tokens, temporal_compression, crop_region, temporal_window, temporal_overlap)
+        
+        return output_video, encoded_token_rates
 
     def forward(
         self,
