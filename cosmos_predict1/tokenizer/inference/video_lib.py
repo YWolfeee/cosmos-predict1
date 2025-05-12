@@ -111,13 +111,21 @@ class CausalVideoTokenizer(torch.nn.Module):
                 if strategy == "global_elbo":
                     rate = avg_rate * torch.mean(chunk_loss) / self.elbo_mean
                     # Round rate to nearest quarter (0.25, 0.5, 0.75, 1.0)
-                    rate = 0.25 * round(rate.item() / 0.25)
-                    rate = min(max(rate, 0.25), 1.0)
+                    # rate = 0.25 * round(rate.item() / 0.25)
+                    # rate = min(max(rate, 0.25), 1.0)
+                    rate = rate.clip(0.0625, 1.0).to(hidden_tensor.device)
                     use_strategy = "elbo"
+                elif strategy == 'global_elbo_bin':
+                    rate = avg_rate * torch.mean(chunk_loss) / self.elbo_mean
+                    rate = 0.25 * round(rate.item() / 0.25)
+                    rate = min(max(rate, 0.0625), 1.0)
+                    rate = torch.tensor([rate]).to(hidden_tensor.device)
+                    use_strategy = "elbo"
+
                 else:
-                    rate = avg_rate
+                    rate = torch.tensor(avg_rate).to(hidden_tensor.device)
                     use_strategy = strategy
-                allocated_ratios = self._full_model.get_allocated_ratios(hidden_tensor.shape, use_adaptive=True, chunk_loss=chunk_loss, manual_base_rate=rate, mask_seq=mask_seq, overwrite_strategy=use_strategy, rescale=False)
+                allocated_ratios = self._full_model.get_allocated_ratios(hidden_tensor, use_adaptive=True, chunk_loss=chunk_loss, manual_base_rate=rate, mask_seq=mask_seq, overwrite_strategy=use_strategy, rescale=False)
                 print("Current allocated ratios: ", allocated_ratios)
                 hidden_tensor, _ = self._full_model.mask_tokens(hidden_tensor, allocated_ratios, mask_method=self._full_model.method, chunk_loss=chunk_loss)
             output_tensor = self._full_model.decode(hidden_tensor)
@@ -266,7 +274,7 @@ class CausalVideoTokenizer(torch.nn.Module):
 
         if "video_elbo" in strategy or ("global_elbo" in strategy and collect_elbo_only):
             print("Start collecting global ELBO ...")
-            if strategy != "video_elbo" and strategy != "global_elbo":
+            if strategy != "video_elbo" and "global_elbo" not in strategy:
                 elbo_base = float(strategy[:3]) # [1.0, 0.5]
             else:
                 elbo_base = 1.0

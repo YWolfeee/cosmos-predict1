@@ -222,8 +222,14 @@ def main_psnr_ssim() -> None:
     with open(psnr_filename, "w") as fw:
         json.dump(psnr_values, fw)
 
+    with open(psnr_filename[:-4] + "avg.log", 'w') as fw:
+        fw.write(str(np.mean([el[-1] for el in psnr_values])))
+
     with open(ssim_filename, "w") as fw:
         json.dump(ssim_values, fw)
+
+    with open(ssim_filename[:-4] + 'avg.log', 'w') as fw:
+        fw.write(str(np.mean([el[-1] for el in ssim_values])))
 
 
 def main_lpips() -> None:
@@ -259,6 +265,9 @@ def main_lpips() -> None:
 
     with open(lpips_filename, "w") as fw:
         json.dump(lpips_values, fw)
+
+    with open(lpips_filename[:-4] + 'avg.log', "w") as fw:
+        fw.write(str(np.mean([el[-1] for el in lpips_values])))
 
 
 def main_fvd(max_n_frame: int = 300) -> None:

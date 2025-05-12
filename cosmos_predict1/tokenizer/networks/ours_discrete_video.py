@@ -177,35 +177,37 @@ class OursDiscreteVideoTokenizer(nn.Module):
         self.save_loss = torch.roll(self.save_loss, 1, dims=0)
         self.save_loss[0] = loss.mean().item()
 
-    def get_allocated_ratios(self, token_shape, use_adaptive=True, chunk_loss=None, manual_base_rate: float=None, mask_seq: bool = False, overwrite_strategy: str = None, rescale: bool = False):
+    def get_allocated_ratios(self, z, use_adaptive=True, chunk_loss=None, manual_base_rate: None|torch.Tensor=None, mask_seq: bool = False, overwrite_strategy: None|str = None, rescale: bool = False):
         """
         Get the allocated ratios for each block.
         Returns:
             torch.Tensor: The allocated ratios for each block.
         """
+        token_shape = z.shape
         batch_size, d, num_blocks, h, w = token_shape
         if not use_adaptive:
             return torch.ones((batch_size, num_blocks))
         strategy = overwrite_strategy if overwrite_strategy is not None else self.rate_strategy
 
         # base_rate has size (B,)
-        base_rate = torch.tensor([1.0, 0.75, 0.5, 0.25])[torch.randint(0, 4, (batch_size,))]
+        base_rate = torch.tensor([1.0, 0.75, 0.5, 0.25])[torch.randint(0, 4, (batch_size,))].to(z.device)
         if manual_base_rate is not None:
-            print(f"manual_base_rate: {manual_base_rate}")
-            base_rate = torch.ones((batch_size,)) * manual_base_rate
+            base_rate = torch.ones((batch_size,), device=z.device) * manual_base_rate
 
         if rescale:
             assert chunk_loss is not None, "chunk_loss must be provided for rescaling"
+            print("rescale with chunk_loss")
             base_rate = self.rescale_and_push(chunk_loss.mean(dim=(-1,-2,-3)), 
                                               base_rate)
+        print(f"manual_base_rate: {manual_base_rate}, base_rate: {base_rate}")
 
         if mask_seq:
             return base_rate[:, None]
 
-        if strategy == 'static':
-            allocation_ratios = torch.ones((batch_size, num_blocks,)) * base_rate[:, None]
-        elif strategy == 'uniform':
-            rate = torch.rand(batch_size, num_blocks).clip(0.0625)
+        if 'static' in self.rate_strategy:
+            allocation_ratios = torch.ones((batch_size, num_blocks,), device=z.device) * base_rate[:, None]
+        elif 'uniform' in self.rate_strategy:
+            rate = torch.rand(batch_size, num_blocks).clip(0.0625).to(z.device)
             rate = rate / rate.mean(dim=-1)
             allocation_ratios = (rate * base_rate[:, None])
         elif 'elbo' in strategy:
@@ -252,6 +254,8 @@ class OursDiscreteVideoTokenizer(nn.Module):
                 spliter = int(mask_method.split("_")[1])
                 adaptive_mask = adaptive_mask.reshape(batch_size, d, t, spliter, -1).permute(0, 1, 2, 4, 3)
                 adaptive_mask = adaptive_mask.reshape(batch_size, d, t, -1)
+        else:
+            raise ValueError
         
         z = torch.where(adaptive_mask, z, torch.zeros_like(z))
         return z.reshape(batch_size, d, -1, h, w), adaptive_mask
