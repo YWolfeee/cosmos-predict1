@@ -263,10 +263,10 @@ def _run_eval() -> None:
         token_rates.append([os.path.basename(filepath), token_rate])
         
         logging.info("Constructing output filepath ...")
-        if args.overlap_window > 0:
-            output_dir = args.output_dir + "_overlap" + str(args.overlap_window)
-        else:
-            output_dir = args.output_dir
+        # if args.overlap_window > 0:
+        #     output_dir = args.output_dir + "_overlap" + str(args.overlap_window)
+        # else:
+        output_dir = args.output_dir
         output_filepath = get_output_filepath(filepath, output_dir=output_dir)
         logging.info(f"Outputing {output_filepath} ...")
         write_video(output_filepath, output_video, fps=args.output_fps)

@@ -3,9 +3,13 @@ wandb/
 datasets/
 __pycache__
 apex/
+.vscode/
+temp*
+tokenbench_*
 Video_Tokenization.ipynb
 *.e*
 *.o*
 
 TokenBench/pretrained_ckpts
 cosmos_predict1/tokenizer/inference/TokenBench.code-workspace
+reconstructions*

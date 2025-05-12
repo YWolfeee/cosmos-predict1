@@ -204,9 +204,9 @@ class OursDiscreteVideoTokenizer(nn.Module):
         if mask_seq:
             return base_rate[:, None]
 
-        if 'static' in self.rate_strategy:
+        if 'static' in overwrite_strategy:
             allocation_ratios = torch.ones((batch_size, num_blocks,), device=z.device) * base_rate[:, None]
-        elif 'uniform' in self.rate_strategy:
+        elif 'uniform' in overwrite_strategy:
             rate = torch.rand(batch_size, num_blocks).clip(0.0625).to(z.device)
             rate = rate / rate.mean(dim=-1)
             allocation_ratios = (rate * base_rate[:, None])
