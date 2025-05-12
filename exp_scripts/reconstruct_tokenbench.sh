@@ -11,5 +11,6 @@ CUDA_VISIBLE_DEVICES=1 python3 -m cosmos_predict1.tokenizer.inference.video_cli 
     --mode torch \
     --strategy ${strategy} \
     --avg_rate ${avg_rate} \
-    --tokenizer_type ${tokenizer_type} \
+    --tokenizer_type "${tokenizer_type}" \
+    --temporal_overlap ${temporal_overlap}
     

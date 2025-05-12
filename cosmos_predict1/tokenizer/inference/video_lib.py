@@ -18,6 +18,7 @@
 from typing import Any
 from einops import rearrange
 
+import math
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -192,7 +193,8 @@ class CausalVideoTokenizer(torch.nn.Module):
         num_frames = video.shape[1]  # can be of any length.
         encoded_tokens = []
         encoded_token_rates = []
-        iters = (num_frames - temporal_window) // (temporal_window - temporal_overlap) + 1
+        crop_regions = []
+        iters = math.ceil((num_frames - temporal_window) / (temporal_window - temporal_overlap)) + 1
         for idx in tqdm(range(0, iters)):
             start = 0 if idx == 0 else idx * (temporal_window - temporal_overlap)
             end = start + temporal_window
@@ -200,37 +202,39 @@ class CausalVideoTokenizer(torch.nn.Module):
 
             # Spatio-temporally pad input_video so it's evenly divisible.
             padded_input_video, crop_region = pad_video_batch(input_video)
+            crop_regions.append(crop_region)
             input_tensor = numpy2tensor(padded_input_video, dtype=self._dtype, device=self._device)
             tokens, token_rate = self.adaptive_encode(input_tensor, strategy, avg_rate) # tokens: [B, D, T, H, W], token_rate: [B, T]
-            temporal_compression = (temporal_window - 1) // (tokens.shape[2] - 1)
-            start_idx = 0 if start == 0 else (temporal_overlap + temporal_compression - 1) // temporal_compression
-            encoded_tokens.append(tokens[:, :, start_idx:])
-            encoded_token_rates.append(token_rate[:, start_idx:])
+            temporal_compression = (input_tensor.shape[2] - 1) // (tokens.shape[2] - 1)
+            num_overlapped_tokens = 0 if start == 0 else (temporal_overlap + temporal_compression - 1) // temporal_compression
+            encoded_tokens.append(tokens[:, :, num_overlapped_tokens:])
+            encoded_token_rates.append(token_rate[:, num_overlapped_tokens:])
         
         encoded_tokens = torch.cat(encoded_tokens, dim=2) # [B, D, T_full, H, W]
-        encoded_token_rates = torch.cat(encoded_token_rates, dim=1), # [B, T_full]
-        return encoded_tokens, encoded_token_rates, crop_region, temporal_compression
+        encoded_token_rates = torch.cat(encoded_token_rates, dim=1) # [B, T_full]
+        return encoded_tokens, encoded_token_rates, crop_regions, temporal_compression
     
     def decode_with_overlap(
         self,
         encoded_tokens: torch.Tensor,
         temporal_compression: int,
-        crop_region: tuple[int, int, int, int],
+        crop_regions: list[tuple[int, int, int, int]],
         temporal_window: int = 17,
         temporal_overlap: int = 1
     ) -> np.ndarray:
+        print("encoded_tokens.shape:", encoded_tokens.shape)
         output_video_list = []
         num_total_tokens = encoded_tokens.shape[2]
-        temporal_token_window = (temporal_window + temporal_compression - 1) // temporal_compression
-        temporal_token_overlap = (temporal_overlap + temporal_compression - 1) // temporal_compression
-        iters = (num_total_tokens - temporal_token_window) // (temporal_token_window - temporal_token_overlap) + 1
+        temporal_token_window = math.ceil(temporal_window / temporal_compression)
+        temporal_token_overlap = math.ceil(temporal_overlap / temporal_compression)
+        iters = math.ceil((num_total_tokens - temporal_token_window) / (temporal_token_window - temporal_token_overlap)) + 1
         for idx in tqdm(range(0, iters)):
             start = 0 if idx == 0 else idx * (temporal_token_window - temporal_token_overlap)
             end = start + temporal_token_window
             input_tokens = encoded_tokens[:, :, start:end]
             output_tensor = self.adaptive_decode(input_tokens)
             padded_output_video = tensor2numpy(output_tensor)
-            output_video = unpad_video_batch(padded_output_video, crop_region)
+            output_video = unpad_video_batch(padded_output_video, crop_regions[idx])
             start_idx = 0 if start == 0 else temporal_overlap
             output_video_list.append(output_video[:, start_idx:])
         
@@ -263,10 +267,6 @@ class CausalVideoTokenizer(torch.nn.Module):
 
         if "video_elbo" in strategy or ("global_elbo" in strategy and collect_elbo_only):
             print("Start collecting global ELBO ...")
-            if strategy != "video_elbo" and strategy != "global_elbo":
-                elbo_base = float(strategy[:3]) # [1.0, 0.5]
-            else:
-                elbo_base = 1.0
             num_frames = video.shape[1]  # can be of any length.
             iters = (num_frames - temporal_window) // (temporal_window - temporal_overlap) + 1
             for idx in tqdm(range(0, iters)):
@@ -281,9 +281,8 @@ class CausalVideoTokenizer(torch.nn.Module):
         if collect_elbo_only:
             return
         
-        encoded_tokens, encoded_token_rates, crop_region, temporal_compression = self.encode_with_overlap(video, temporal_window, strategy, avg_rate, temporal_overlap)
-        output_video = self.decode_with_overlap(encoded_tokens, temporal_compression, crop_region, temporal_window, temporal_overlap)
-        
+        encoded_tokens, encoded_token_rates, crop_regions, temporal_compression = self.encode_with_overlap(video, temporal_window, strategy, avg_rate, temporal_overlap)
+        output_video = self.decode_with_overlap(encoded_tokens, temporal_compression, crop_regions, temporal_window, temporal_overlap)
         return output_video, encoded_token_rates
 
     def forward(
