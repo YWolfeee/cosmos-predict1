@@ -18,7 +18,8 @@ from enum import Enum
 from cosmos_predict1.tokenizer.modules.distributions import GaussianDistribution, IdentityDistribution
 from cosmos_predict1.tokenizer.modules.layers2d import Decoder, Encoder
 from cosmos_predict1.tokenizer.modules.layers3d import DecoderBase, DecoderFactorized, EncoderBase, EncoderFactorized
-from cosmos_predict1.tokenizer.modules.quantizers import FSQuantizer, LFQuantizer, ResidualFSQuantizer, VectorQuantizer
+from cosmos_predict1.tokenizer.modules.layers3d_vit import EncoderViT, DecoderViT
+from cosmos_predict1.tokenizer.modules.quantizers import FSQuantizer, LFQuantizer, ResidualFSQuantizer, CascadeFSQuantizer, VectorQuantizer
 
 
 class EncoderType(Enum):

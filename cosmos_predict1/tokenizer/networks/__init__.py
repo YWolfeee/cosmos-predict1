@@ -23,10 +23,15 @@ from cosmos_predict1.tokenizer.networks.configs import discrete_image_8x8_360p a
 from cosmos_predict1.tokenizer.networks.configs import discrete_image_16x16_360p as discrete_image_16x16_360p_dict
 from cosmos_predict1.tokenizer.networks.configs import discrete_video_4x8x8_360p as discrete_video_4x8x8_360p_dict
 from cosmos_predict1.tokenizer.networks.configs import discrete_video_8x16x16_720p as discrete_video_8x16x16_720p_dict
+from cosmos_predict1.tokenizer.networks.configs import ours_discrete_video_4x8x8_256p as ours_discrete_video_4x8x8_256p_dict
+from cosmos_predict1.tokenizer.networks.configs import ours_discrete_video_4x8x8_concat as ours_discrete_video_4x8x8_concat_dict
+from cosmos_predict1.tokenizer.networks.configs import ours_discrete_video_4x8x8_mse as ours_discrete_video_4x8x8_mse_dict
+from cosmos_predict1.tokenizer.networks.configs import ours_discrete_video_4x8x8_order4 as ours_discrete_video_4x8x8_order4_dict
 from cosmos_predict1.tokenizer.networks.continuous_image import ContinuousImageTokenizer
 from cosmos_predict1.tokenizer.networks.continuous_video import CausalContinuousVideoTokenizer
 from cosmos_predict1.tokenizer.networks.discrete_image import DiscreteImageTokenizer
 from cosmos_predict1.tokenizer.networks.discrete_video import CausalDiscreteVideoTokenizer
+from cosmos_predict1.tokenizer.networks.ours_discrete_video import OursDiscreteVideoTokenizer
 
 
 class TokenizerConfigs(Enum):
@@ -59,9 +64,23 @@ class TokenizerConfigs(Enum):
     # Cosmos-Tokenize1-DV4x8x8-360p
     DV4x8x8_360p = discrete_video_4x8x8_360p_dict
 
+    """Ours Discrete Video (OURS) Tokenizer Configs"""
+    # Cosmos-Tokenize1-OURS4x8x8-256p
+    OURS4x8x8_256p = ours_discrete_video_4x8x8_256p_dict
+
+    # Cosmos-Tokenize1-OURS4x8x8-256p
+    OURS4x8x8_mse = ours_discrete_video_4x8x8_mse_dict
+
+    # Cosmos-Tokenize1-OURS4x8x8-concat-256p
+    OURS4x8x8_concat = ours_discrete_video_4x8x8_concat_dict
+
+    # Cosmos-Tokenize1-OURS4x8x8-order4-256p
+    OURS4x8x8_order4 = ours_discrete_video_4x8x8_order4_dict
+
 
 class TokenizerModels(Enum):
     CI = ContinuousImageTokenizer
     DI = DiscreteImageTokenizer
     CV = CausalContinuousVideoTokenizer
     DV = CausalDiscreteVideoTokenizer
+    OURS = OursDiscreteVideoTokenizer

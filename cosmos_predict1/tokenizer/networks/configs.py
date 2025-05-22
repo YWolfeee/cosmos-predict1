@@ -21,7 +21,7 @@ from cosmos_predict1.tokenizer.modules import (
     DecoderType,
     DiscreteQuantizer,
     Encoder3DType,
-    EncoderType,
+    EncoderType
 )
 
 continuous_image = dict(
@@ -180,3 +180,90 @@ discrete_video_4x8x8_360p["z_channels"] = 256
 discrete_video_4x8x8_360p["temporal_compression"] = 4
 discrete_video_4x8x8_360p["spatial_compression"] = 8
 discrete_video_4x8x8_360p["patch_size"] = 2
+
+# TODO: Check, this might be redundant
+config = dict(
+    hidden_size=768, # smaller for DEBUG, 4096 for full
+    intermediate_size=768, # smaller for DEBUG, 11008 for full
+    num_encoder_layers=4, # smaller for DEBUG, 16 for full
+    num_decoder_layers=4, # smaller for DEBUG, 16 for full
+    num_attention_heads=16, # smaller for DEBUG, 32 for full
+    max_sequence_length=4096, # Not sure about this
+    theta=10000.0,
+    rms_norm_eps=1e-5,
+    initializer_range=0.02
+)
+
+ours_discrete_video = dict(
+    name="OURS",
+    attn_resolutions=[32],
+    channels=128,
+    channels_mult=[2, 4, 4],
+    dropout=0.0,
+    in_channels=3,
+    num_res_blocks=2,
+    out_channels=3,
+    resolution=1024,
+    patch_size=2,
+    patch_method="haar",
+    # The encoder output channels just before quantization is changed to 256
+    # from 16 (old versions). It aligns with the DI that uses 256 channels,
+    # making initialization from image tokenizers easier.
+    z_channels=256,
+    z_factor=1,
+    num_groups=1,
+    # Most of the CV and DV tokenizers trained before September 1, 2024,
+    # used temporal upsampling that was not perfectly mirrored with the
+    # # encoder's temporal downsampling. Moving forward, new CV/DV tokenizers
+    # will use legacy_mode=False, meaning they will adopt mirrored upsampling.
+    legacy_mode=False,
+    spatial_compression=8,
+    temporal_compression=4,
+    quantizer=DiscreteQuantizer.FSQ.name,
+    embedding_dim=6,
+    levels=[8, 8, 8, 5, 5, 5],
+    encoder=Encoder3DType.FACTORIZED.name,
+    decoder=Decoder3DType.FACTORIZED.name,
+    rate_strategy='static',
+    use_vit=True,
+    freeze_original=False,
+    vit_config=dict(
+        hidden_size=256,
+        intermediate_size=512,
+        num_encoder_layers=4,
+        num_decoder_layers=4,
+        num_attention_heads=32,
+        theta=10000.0,
+        rms_norm_eps=1e-5,
+        initializer_range=0.02,
+        max_num_video_frames=49,
+        switch_rotary_to_1d=1.0,
+        max_sequence_length=96,
+        max_sequence_length_1d=8192,
+        concat_decode_2d=False,
+        special_attn=False,
+        method="order"
+    ),
+)
+
+ours_discrete_video_4x8x8_256p = dict(ours_discrete_video)
+ours_discrete_video_4x8x8_256p["temporal_compression"] = 4
+ours_discrete_video_4x8x8_256p["spatial_compression"] = 8
+ours_discrete_video_4x8x8_256p["vit_config"]["num_encoder_layers"] = 8
+ours_discrete_video_4x8x8_256p["vit_config"]["num_decoder_layers"] = 8
+ours_discrete_video_4x8x8_256p["rate_strategy"] = "elbo"
+ours_discrete_video_4x8x8_256p["freeze_original"] = False
+
+ours_discrete_video_4x8x8_mse_256p = dict(ours_discrete_video_4x8x8_256p)
+ours_discrete_video_4x8x8_mse_256p["vit_config"]["concat_decode_2d"] = False
+ours_discrete_video_4x8x8_mse_256p["vit_config"]["special_attn"] = False
+ours_discrete_video_4x8x8_mse_256p["vit_config"]["method"] = "mse"
+
+ours_discrete_video_4x8x8_order4_256p = dict(ours_discrete_video_4x8x8_256p)
+ours_discrete_video_4x8x8_order4_256p["vit_config"]["concat_decode_2d"] = False
+ours_discrete_video_4x8x8_order4_256p["vit_config"]["special_attn"] = False
+ours_discrete_video_4x8x8_order4_256p["vit_config"]["method"] = "order_4"
+
+ours_discrete_video_4x8x8_concat_256p = dict(ours_discrete_video_4x8x8_256p)
+ours_discrete_video_4x8x8_concat_256p["freeze_original"] = False
+ours_discrete_video_4x8x8_concat_256p["vit_config"]["concat_decode_2d"] = True
