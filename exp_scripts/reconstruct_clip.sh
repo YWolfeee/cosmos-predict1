@@ -5,7 +5,7 @@ source TokenBench/env.sh
 
 CUDA_VISIBLE_DEVICES=2 python3 -m cosmos_predict1.tokenizer.inference.video_cli \
     --video_pattern "${DATASET_DIR}/${GT_VIDEO_DIR}/*.mp4" \
-    --checkpoint checkpoints/${model_name}/${pt_name}.pt \
+    --checkpoint "${CHECKPOINT_DIR}/${model_name}/${pt_name}.pt" \
     --output_dir ${DATASET_DIR}/${GT_VIDEO_CLIPS_DIR} \
     --temporal_window 33 \
     --mode torch \

@@ -39,6 +39,7 @@ from argparse import ArgumentParser, Namespace
 from typing import Any
 
 import numpy as np
+import json
 from loguru import logger as logging
 from tqdm import tqdm
 
@@ -249,6 +250,21 @@ def _run_eval() -> None:
         
         elbo_fig_path, elbo_mean, elbo_median = visualize_elbo_distribution(autoencoder.elbos, args.output_dir)
         autoencoder.elbo_mean = elbo_mean # use elbo_median as the mean
+    elif "psnr_elbo" in args.strategy:
+        psnr_file_path = args.output_dir.replace(args.strategy, "elbo")
+        assert os.path.exists(os.path.join(psnr_file_path, "psnr.csv")), f"PSNR file not found: {os.path.join(psnr_file_path, 'psnr.csv')}"
+        _UINT8_MAX_F = float(np.iinfo(np.uint8).max)
+
+        with open(os.path.join(psnr_file_path, "psnr.csv"), 'r') as f:
+            psnr_dict = {w[0]: w[1] for w in json.load(f)}
+        rmse_dict = {k: np.sqrt(10 ** ((20 * np.log10(_UINT8_MAX_F) - v) / 10)) 
+                     for k, v in psnr_dict.items()}
+        rmse_mean, rmse_std = np.mean(list(rmse_dict.values())), np.std(list(rmse_dict.values()))
+        logging.info(f"RMSE mean: {rmse_mean}, std: {rmse_std}")
+        map_rate = lambda x: (x - rmse_mean) / 6 / rmse_std + 1
+        ratio_dict = {k: map_rate(v) for k, v in rmse_dict.items()}
+        rate_dict = {k: np.clip(v * args.avg_rate, 1/16, 1.0) for k, v in ratio_dict.items()}
+        _, _, _ = visualize_elbo_distribution(list(rate_dict.values()), args.output_dir)
 
     token_rates = []
     for filepath in filepaths:
@@ -258,7 +274,7 @@ def _run_eval() -> None:
 
         logging.info("Invoking the autoencoder model in ... ")
         batch_video = video[np.newaxis, ...]
-        output_video, token_rate = autoencoder(batch_video, temporal_window=args.temporal_window, strategy=args.strategy, avg_rate=args.avg_rate, overlap_window=args.overlap_window)
+        output_video, token_rate = autoencoder(batch_video, temporal_window=args.temporal_window, strategy=args.strategy, avg_rate=args.avg_rate, overlap_window=args.overlap_window, assigned_rate=rate_dict[os.path.basename(filepath)] if "psnr_elbo" in args.strategy else None)
         output_video = output_video[0]
         token_rates.append([os.path.basename(filepath), token_rate])
         

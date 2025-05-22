@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=1N@tokenizer_eval@P1
+#SBATCH --job-name=1N@quick_tokenizer_eval@P1
 #SBATCH --time=02:00:00             # Time limit
 #SBATCH --account=dir_cosmos_misc
 #SBATCH --partition=batch
@@ -28,7 +28,7 @@ pwd
 srun --export=ALL -l \
      --container-image=$me/docker_images/imaginaire4_fsdp2.sqsh \
      --container-mounts=$me/joint_training/:/joint_training \
-     bash /joint_training/cosmos-predict1/exp_scripts/env_entrance.sh $1 $2 $3 $4 $5
+     bash /joint_training/cosmos-predict1/exp_scripts/env_entrance.sh $1 $2 $3 $4 $5 $6
 
 exit_status=$?
 echo "exit status code $exit_status"

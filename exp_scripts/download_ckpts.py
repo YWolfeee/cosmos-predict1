@@ -9,7 +9,15 @@ import os
 
 
 # mock_DV4x8x8_t49_256p_c16_merge_DV_haotian_order4_pure2d_layer88_elbo_0.125_nofreeze
-for rate in [0.125, 0.25, 0.5]:
+# name_list = [
+#     "mock_DV4x8x8_t49_256p_c16_merge_DV_haotian_order4_pure2d_layer88_elbo_nofreeze",
+#     "mock_DV4x8x8_t49_256p_c16_merge_DV_haotian_order4_pure2d_layer88_uniform_nofreeze",
+#     "mock_DV4x8x8_t49_256p_c16_merge_DV_haotian_mse_pure2d_layer88_elboema4safe_nofreeze",
+#     "mock_DV4x8x8_t49_256p_c16_merge_DV_haotian_finetune_from_static_pure2d_layer88_elbo_nofreeze",
+#     "mock_DV4x8x8_t49_256p_c16_merge_DV_haotian_finetune_from_static_pure2d_layer88_uniform_nofreeze"
+# ]
+# for path in name_list:
+for rate in [0.75]:
     for method in ['elbo', 'static']:
         for mask in ['mse', 'order4']:
             if method == 'static' and mask == 'mse':
@@ -17,12 +25,8 @@ for rate in [0.125, 0.25, 0.5]:
             path=f"mock_DV4x8x8_t49_256p_c16_merge_DV_haotian_{mask}_pure2d_layer88_{method}_{rate}_nofreeze"
 
             model_name = path
-            pt_name = "iter_000075000"
-            strategy = 'global_elbo' if method == 'elbo' else 'static'
-            avg_rate = str(rate)
-            tokenizer_type = f"OURS4x8x8-{mask}-256p-88"
+            pt_name = "iter_000095000"
 
-            # cmd = f"sbatch exp_scripts/submit_batch_eval.sh {model_name} {pt_name} {strategy} {avg_rate} {tokenizer_type}"
             os.makedirs(path, exist_ok=True)
             cmd=f"s5cmd --credentials-file ~/.aws/credentials  --profile vfm_checkpoint cp  s3://checkpoints/cosmos_tokenizer2/cosmos/{path}/checkpoints/{pt_name}.pt ./{path}"
 

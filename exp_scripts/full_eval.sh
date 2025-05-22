@@ -25,6 +25,18 @@ mkdir -p "$OUTPUT_PATH"
 # 3. Parallel reconstruction
 for (( i=0; i<NGPUS; i++ )); do
   SUBDIR="${DATASET_DIR}/${GT_VIDEO_CLIPS_DIR}/subset_${i}"
+  mkdir -p "$SUBDIR"
+
+  START=$(( i * PER_GPU ))
+  END=$(( START + PER_GPU ))
+  (( END > TOTAL )) && END=$TOTAL
+
+  # Create symbolic links in the output subset directory
+  for (( j=START; j<END; j++ )); do
+    if [ ! -f "$SUBDIR/$(basename "${FILES[j]}")" ]; then
+      ln -s "${FILES[j]}" "$SUBDIR/"
+    fi
+  done
 
   CUDA_VISIBLE_DEVICES="$i" python3 -m cosmos_predict1.tokenizer.inference.video_cli \
       --video_pattern "${SUBDIR}/*.mp4" \

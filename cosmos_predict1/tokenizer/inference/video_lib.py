@@ -258,7 +258,8 @@ class CausalVideoTokenizer(torch.nn.Module):
         strategy: str = "static",
         avg_rate: float = 0.5,
         collect_elbo_only: bool = False,
-        overlap_window: int = 0
+        overlap_window: int = 0,
+        assigned_rate: float = None,
     ) -> np.ndarray:
         """Reconstructs video using a pre-trained CausalTokenizer autoencoder.
         Given a video of arbitrary length, the forward invokes the CausalVideoTokenizer
@@ -271,6 +272,10 @@ class CausalVideoTokenizer(torch.nn.Module):
             The reconstructed video in range [0..255], layout BxTxHxWx3.
         """
         assert video.ndim == 5, "input video should be of 5D."
+
+        if assigned_rate is not None:
+            assert overlap_window == 0, "overlap_window should be 0 when using assigned_rate."
+            assert strategy == 'psnr_elbo', "strategy should be psnr_elbo when using assigned_rate."
         
         if overlap_window > 0:
             return self.forward_with_overlap(video, temporal_window, strategy, avg_rate, collect_elbo_only, overlap_window)
@@ -311,6 +316,9 @@ class CausalVideoTokenizer(torch.nn.Module):
             input_tensor = numpy2tensor(padded_input_video, dtype=self._dtype, device=self._device)
             # self.get_token_loss_curve(input_tensor)
             # assert False
+            if assigned_rate is not None:
+                print("Using assigned rate: ", assigned_rate)
+                avg_rate = assigned_rate
             output_tensor, token_rate = self.autoencode(input_tensor, strategy=strategy, avg_rate=avg_rate)
             padded_output_video = tensor2numpy(output_tensor)
             output_video = unpad_video_batch(padded_output_video, crop_region)
