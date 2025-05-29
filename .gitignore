@@ -1,0 +1,7 @@
+__py*
+checkpoints
+temp*
+datasets
+logs
+wandb
+
